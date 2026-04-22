@@ -1646,6 +1646,13 @@ public final class Codegen {
 
         /* ---------------- invoke / blend ---------------- */
 
+        /**
+         * Straight {@code pool[i].compute(ctx)} — do not wrap every extern in a
+         * cache try/miss path: most externs are not {@code NoiseChunk} cache
+         * wrappers, so a universal wrapper regresses hot paths (extra static
+         * call, NaN check, second {@code GETFIELD} on miss). A future opt-in
+         * can target only known wrapper slots at compile time.
+         */
         private void emitInvoke(int idx) {
             mv.visitVarInsn(Opcodes.ALOAD, 0);
             if (castSelfForSubclassNoiseFields) {

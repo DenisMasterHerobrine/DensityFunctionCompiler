@@ -58,7 +58,7 @@ import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
  * no point earlier in the call chain where noises are bound but the router has not yet
  * been consumed by callers.
  */
-@Mixin(RandomState.class)
+@Mixin(value = RandomState.class, priority = 2000)
 public abstract class RandomStateMixin {
 
     @Mutable

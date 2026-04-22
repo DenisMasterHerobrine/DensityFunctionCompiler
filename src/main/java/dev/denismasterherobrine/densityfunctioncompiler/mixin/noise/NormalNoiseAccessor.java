@@ -25,7 +25,7 @@ import org.spongepowered.asm.mixin.gen.Accessor;
  * will fail loudly when it tries to bind the accessor and the affected noise will fall
  * back to the legacy un-inlined emission path.
  */
-@Mixin(NormalNoise.class)
+@Mixin(value = NormalNoise.class, priority = 2000)
 public interface NormalNoiseAccessor {
 
     @Accessor("valueFactor")

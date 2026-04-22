@@ -35,6 +35,9 @@ authors = "${mod_authors}" #optional
 description = '''${mod_description}'''
 
 # The [[mixins]] block allows you to declare your mixin config to FML so that it gets loaded.
+# MixinSquared must load first: its plugin bootstraps MixinSquared before other mixin configs.
+[[mixins]]
+config = "mixinsquared.neoforge.init.mixins.json"
 [[mixins]]
 config = "${mod_id}.mixins.json"
 
@@ -71,6 +74,17 @@ type = "required"
 versionRange = "${minecraft_version_range}"
 ordering = "NONE"
 side = "BOTH"
+
+# Moonrise (e.g. Tuinity/Moonrise): optional co-install. DFC uses higher Mixin priority and
+# MixinSquared so our worldgen pipeline wins when both touch the same targets; add
+# mixins/compat to patch Moonrise handlers if a future version introduces conflicts.
+[[dependencies."${mod_id}"]]
+modId = "moonrise"
+type = "optional"
+versionRange = "[0.0.0,)"
+ordering = "NONE"
+side = "BOTH"
+reason = "DFC is tuned to take precedence over Moonrise mixins when both apply; MixinSquared is bundled for @TargetHandler patches."
 
 # Features are specific properties of the game environment, that you may want to declare you require. This example declares
 # that your mod requires GL version 3.2 or higher. Other features will be added. They are side aware so declaring this won't

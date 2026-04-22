@@ -5,6 +5,7 @@ import com.mojang.brigadier.arguments.StringArgumentType;
 import com.mojang.brigadier.builder.LiteralArgumentBuilder;
 import dev.denismasterherobrine.densityfunctioncompiler.DensityFunctionCompiler;
 import dev.denismasterherobrine.densityfunctioncompiler.compiler.pipeline.RouterPipeline;
+import dev.denismasterherobrine.densityfunctioncompiler.test.DfcRuntimeHelpersTest;
 import dev.denismasterherobrine.densityfunctioncompiler.test.CoordDepTest;
 import dev.denismasterherobrine.densityfunctioncompiler.test.GlobalClassCacheTest;
 import dev.denismasterherobrine.densityfunctioncompiler.test.LatticePlanTest;
@@ -99,11 +100,12 @@ public final class DfcCommand {
                         GlobalClassCacheTest.verify();
                         CoordDepTest.verify();
                         MapAllSessionTest.verify();
+                        DfcRuntimeHelpersTest.verify();
                         LatticePlanTest.verify();
                         VectorParityTest.verify();
                         ctx.getSource().sendSuccess(
                                 () -> Component.literal("DFC: global class cache + CoordDep + MapAllSession "
-                                        + "+ LatticePlan + VectorParity: OK"), false);
+                                        + "+ runtime helpers + LatticePlan + VectorParity: OK"), false);
                     } catch (Throwable t) {
                         DensityFunctionCompiler.LOGGER.error("DFC cachetest failed", t);
                         ctx.getSource().sendFailure(Component.literal("cachetest: " + t.getMessage()));

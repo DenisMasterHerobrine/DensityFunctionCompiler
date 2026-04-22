@@ -8,7 +8,7 @@ import org.spongepowered.asm.mixin.gen.Accessor;
 /**
  * Read-only accessors for inlining {@link BlendedNoise#compute} (Minecraft 1.21.x field layout).
  */
-@Mixin(BlendedNoise.class)
+@Mixin(value = BlendedNoise.class, priority = 2000)
 public interface BlendedNoiseAccessor {
     @Accessor("minLimitNoise")
     PerlinNoise dfc$getMinLimitNoise();

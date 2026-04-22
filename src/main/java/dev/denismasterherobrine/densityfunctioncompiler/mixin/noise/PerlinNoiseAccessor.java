@@ -28,7 +28,7 @@ import org.spongepowered.asm.mixin.gen.Accessor;
  *       {@code lowestFreqValueFactor * 0.5^i}.</li>
  * </ul>
  */
-@Mixin(PerlinNoise.class)
+@Mixin(value = PerlinNoise.class, priority = 2000)
 public interface PerlinNoiseAccessor {
 
     @Accessor("noiseLevels")

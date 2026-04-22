@@ -48,7 +48,8 @@ import org.spongepowered.asm.mixin.injection.ModifyVariable;
  * cleanly — we modify the parameter, they see the wrapped session as their incoming
  * visitor. The wrapper itself is a {@code DensityFunction.Visitor}, so any downstream
  * code that polymorphically calls {@code visitor.apply} or {@code visitor.visitNoise}
- * still hits the user's hooks.
+ * still hits the user's hooks. Mixin {@code priority = 2000} keeps this ahead of
+ * mods such as Moonrise (default 1000) when multiple injectors compete.
  *
  * <h2>Re-entrancy</h2>
  *
@@ -57,7 +58,7 @@ import org.spongepowered.asm.mixin.injection.ModifyVariable;
  * {@code instanceof} check inside {@link MapAllSession} preserves the outer session
  * across re-entrant calls.
  */
-@Mixin(NoiseRouter.class)
+@Mixin(value = NoiseRouter.class, priority = 2000)
 public abstract class NoiseRouterMixin {
 
     @ModifyVariable(method = "mapAll", at = @At("HEAD"), argsOnly = true)

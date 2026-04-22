@@ -5,6 +5,11 @@
   "compatibilityLevel": "JAVA_21",
   "mixins": [
     "NoiseChunkSessionMixin",
+    "NoiseChunkFlatCacheMixin",
+    "NoiseChunkCache2dMixin",
+    "NoiseChunkCacheAllInCellMixin",
+    "NoiseChunkCacheOnceMixin",
+    "NoiseBasedAquiferMixin",
     "NoiseRouterMixin",
     "RandomStateMixin",
     "noise.NormalNoiseAccessor",

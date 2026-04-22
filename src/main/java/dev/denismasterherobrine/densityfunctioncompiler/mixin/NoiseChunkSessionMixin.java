@@ -78,7 +78,7 @@ import java.util.List;
  * (Minecraft's chunk pipeline never shares a {@code NoiseChunk} across worker
  * threads), so plain instance fields are race-free. We add no synchronization.
  */
-@Mixin(NoiseChunk.class)
+@Mixin(value = NoiseChunk.class, priority = 2000)
 public abstract class NoiseChunkSessionMixin {
 
     @Unique
