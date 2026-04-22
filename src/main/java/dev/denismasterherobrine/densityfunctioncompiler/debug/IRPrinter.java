@@ -85,6 +85,14 @@ public final class IRPrinter {
                 case IRNode.Shift s -> "Shift#" + s.noiseIndex();
                 case IRNode.WeirdScaled w -> "WeirdScaled#" + w.noiseIndex()
                         + " mapper=" + w.rarityValueMapperOrdinal();
+                case IRNode.InlinedNoise in -> {
+                    var spec = pool.noiseSpec(in.specPoolIndex());
+                    yield "InlinedNoise#" + in.specPoolIndex()
+                            + " octaves=" + spec.first().activeOctaves().length
+                            + "+" + spec.second().activeOctaves().length
+                            + " maxValue=" + in.maxValue();
+                }
+                case IRNode.WeirdRarity wr -> "WeirdRarity(mapper=" + wr.rarityValueMapperOrdinal() + ")";
                 case IRNode.EndIslands e -> "EndIslands@" + e.externIndex();
                 case IRNode.Spline.Constant sc -> "Spline.Const(" + sc.value() + ")";
                 case IRNode.Spline.Multipoint mp -> "Spline.Multipoint(n=" + mp.locations().length + ")";

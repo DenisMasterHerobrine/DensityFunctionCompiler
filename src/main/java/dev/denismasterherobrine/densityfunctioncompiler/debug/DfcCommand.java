@@ -31,10 +31,12 @@ public final class DfcCommand {
                     var stats = RouterPipeline.snapshotStats();
                     ctx.getSource().sendSuccess(() -> Component.literal(
                             ("DFC: %d roots compiled, %d unique IR nodes, %d hidden classes alive, "
-                                    + "%d helpers emitted, %d optimizer rewrite passes")
+                                    + "%d helpers emitted, %d optimizer rewrite passes, "
+                                    + "%d noises inlined (%d octaves unrolled)")
                                     .formatted(stats.rootsCompiled(), stats.uniqueNodes(),
                                             stats.classesAlive(), stats.helpersEmitted(),
-                                            stats.optimizerRewrites())),
+                                            stats.optimizerRewrites(),
+                                            stats.noisesInlined(), stats.octavesInlined())),
                             false);
                     return 1;
                 }))
@@ -61,15 +63,23 @@ public final class DfcCommand {
                 .then(Commands.literal("selftest").executes(ctx -> {
                     var src = ctx.getSource();
                     src.sendSuccess(() -> Component.literal("DFC: running parity self-test..."), false);
-                    var result = ParitySelfTest.runArithmeticSubset();
-                    var color = result.failures().isEmpty() ? ChatFormatting.GREEN : ChatFormatting.RED;
+                    var arith = ParitySelfTest.runArithmeticSubset();
+                    var aColor = arith.failures().isEmpty() ? ChatFormatting.GREEN : ChatFormatting.RED;
                     src.sendSuccess(() -> Component.literal(
-                            "DFC self-test: %d/%d cases passed".formatted(result.passed(), result.total()))
-                            .withStyle(color), false);
-                    for (String f : result.failures()) {
+                            "DFC arithmetic self-test: %d/%d cases passed".formatted(arith.passed(), arith.total()))
+                            .withStyle(aColor), false);
+                    for (String f : arith.failures()) {
                         src.sendSuccess(() -> Component.literal("  fail: " + f).withStyle(ChatFormatting.RED), false);
                     }
-                    return result.failures().isEmpty() ? 1 : 0;
+                    var noise = ParitySelfTest.runNoiseSubset(src);
+                    var nColor = noise.failures().isEmpty() ? ChatFormatting.GREEN : ChatFormatting.RED;
+                    src.sendSuccess(() -> Component.literal(
+                            "DFC noise self-test: %d/%d cases passed".formatted(noise.passed(), noise.total()))
+                            .withStyle(nColor), false);
+                    for (String f : noise.failures()) {
+                        src.sendSuccess(() -> Component.literal("  noise fail: " + f).withStyle(ChatFormatting.RED), false);
+                    }
+                    return arith.failures().isEmpty() && noise.failures().isEmpty() ? 1 : 0;
                 }))
                 .then(Commands.literal("parity")
                         .executes(ctx -> RouterParityCommand.runAll(ctx.getSource(), 1024))

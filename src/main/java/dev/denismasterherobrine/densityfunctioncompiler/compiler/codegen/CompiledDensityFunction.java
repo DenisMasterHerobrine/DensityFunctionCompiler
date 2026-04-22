@@ -79,9 +79,9 @@ public abstract class CompiledDensityFunction implements DensityFunction {
      * its cell-cache wrapper).
      *
      * <p>Has the post-{@code asType} signature
-     * {@code (double[], NormalNoise[], Object[], DensityFunction[], double,
-     * double, MethodHandle[], MethodHandle) -> CompiledDensityFunction}, so
-     * {@code invokeExact} just works without further boxing or casting. The
+     * {@code (double[], NormalNoise[], Object[], Object[], DensityFunction[],
+     * double, double, MethodHandle[], MethodHandle) -> CompiledDensityFunction},
+     * so {@code invokeExact} just works without further boxing or casting. The
      * trailing {@code MethodHandle} arg is the constructor MH itself, threaded
      * through so the new instance can rebind again later.
      *
@@ -92,10 +92,30 @@ public abstract class CompiledDensityFunction implements DensityFunction {
      */
     protected final MethodHandle constructorMH;
 
+    /**
+     * Flat {@code Object[]} of {@link net.minecraft.world.level.levelgen.synth.ImprovedNoise}
+     * references — the per-octave samplers the generated subclass populates into
+     * its own typed {@code private final ImprovedNoise} fields at construction
+     * time. The array is kept on the base class purely so {@link
+     * #rebind(NormalNoise[], DensityFunction[])} can pass the same payload
+     * through {@link #constructorMH} when allocating a remapped instance.
+     *
+     * <p>The layout is determined by {@link
+     * dev.denismasterherobrine.densityfunctioncompiler.compiler.codegen.ConstantPool#finishNoiseOctaves()}:
+     * for each interned NoiseSpec in pool order, the first branch's active
+     * octaves are concatenated, then the second branch's. The codegen knows the
+     * per-spec base offset and emits per-octave {@code AALOAD + CHECKCAST
+     * ImprovedNoise + PUTFIELD} into its declared fields once at construction.
+     *
+     * <p>Empty {@code Object[0]} when no noises were inlined for this DF.
+     */
+    protected final Object[] noiseOctaves;
+
     protected CompiledDensityFunction(
             double[] constants,
             NormalNoise[] noises,
             Object[] splines,
+            Object[] noiseOctaves,
             DensityFunction[] externs,
             double minValue,
             double maxValue,
@@ -104,6 +124,7 @@ public abstract class CompiledDensityFunction implements DensityFunction {
         this.constants = constants;
         this.noises = noises;
         this.splines = splines;
+        this.noiseOctaves = noiseOctaves;
         this.externs = externs;
         this.minValue = minValue;
         this.maxValue = maxValue;
@@ -178,7 +199,7 @@ public abstract class CompiledDensityFunction implements DensityFunction {
         }
         try {
             return (CompiledDensityFunction) constructorMH.invokeExact(
-                    constants, visitedNoises, splines, visitedExterns,
+                    constants, visitedNoises, splines, noiseOctaves, visitedExterns,
                     minValue, maxValue, helperHandles, constructorMH);
         } catch (Throwable t) {
             throw new RuntimeException(

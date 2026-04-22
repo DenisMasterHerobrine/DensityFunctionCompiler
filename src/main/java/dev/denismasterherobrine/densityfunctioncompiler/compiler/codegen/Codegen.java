@@ -81,11 +81,16 @@ public final class Codegen {
     private static final String COMPILED_BASE_INTERNAL =
             Type.getInternalName(CompiledDensityFunction.class);
     private static final String NORMAL_NOISE_INTERNAL = "net/minecraft/world/level/levelgen/synth/NormalNoise";
+    static final String IMPROVED_NOISE_INTERNAL = "net/minecraft/world/level/levelgen/synth/ImprovedNoise";
     private static final String DENSITY_FUNCTION_INTERNAL = "net/minecraft/world/level/levelgen/DensityFunction";
     private static final String FUNCTION_CONTEXT_INTERNAL =
             "net/minecraft/world/level/levelgen/DensityFunction$FunctionContext";
     private static final String METHOD_HANDLE_INTERNAL = "java/lang/invoke/MethodHandle";
     private static final String METHOD_HANDLE_ARRAY_DESC = "[Ljava/lang/invoke/MethodHandle;";
+    private static final String OBJECT_ARRAY_DESC = "[Ljava/lang/Object;";
+    private static final String IMPROVED_NOISE_DESC = "L" + IMPROVED_NOISE_INTERNAL + ";";
+    private static final String RUNTIME_INTERNAL =
+            "dev/denismasterherobrine/densityfunctioncompiler/compiler/runtime/Runtime";
 
     /**
      * Constructor descriptor used both by {@link #emitConstructor} and by
@@ -94,9 +99,14 @@ public final class Codegen {
      * itself, threaded through so {@link CompiledDensityFunction#rebind} can
      * allocate fresh instances without {@code NEW SelfClass} (which hidden
      * classes are forbidden from emitting).
+     *
+     * <p>The {@code Object[]} after the splines array is the per-noise per-octave
+     * {@link net.minecraft.world.level.levelgen.synth.ImprovedNoise} payload —
+     * see {@link CompiledDensityFunction#noiseOctaves}. The generated subclass
+     * unloads it into its own typed final fields in its constructor body.
      */
     public static final String CTOR_DESC =
-            "([D[L" + NORMAL_NOISE_INTERNAL + ";[Ljava/lang/Object;[L"
+            "([D[L" + NORMAL_NOISE_INTERNAL + ";[Ljava/lang/Object;[Ljava/lang/Object;[L"
                     + DENSITY_FUNCTION_INTERNAL + ";DD" + METHOD_HANDLE_ARRAY_DESC
                     + "L" + METHOD_HANDLE_INTERNAL + ";)V";
 
@@ -143,7 +153,11 @@ public final class Codegen {
         cw.visit(Opcodes.V21, Opcodes.ACC_PUBLIC | Opcodes.ACC_FINAL,
                 classInternalName, null, COMPILED_BASE_INTERNAL, null);
 
-        emitConstructor(cw);
+        // Declare per-noise per-octave ImprovedNoise fields so the inlined emission
+        // path can GETFIELD them by name rather than going through the inherited
+        // Object[] noiseOctaves with AALOAD+CHECKCAST on every call.
+        emitNoiseFields(cw, pool);
+        emitConstructor(cw, classInternalName, pool);
         // Note: rebind() is implemented in the supertype using the constructor MethodHandle
         // we thread through; we deliberately do NOT emit a rebind override here because that
         // would require a `NEW classInternalName` instruction, which hidden classes cannot
@@ -165,11 +179,41 @@ public final class Codegen {
     /* Constructor                                                           */
     /* --------------------------------------------------------------------- */
 
-    private static void emitConstructor(ClassWriter cw) {
-        // (double[], NormalNoise[], Object[], DensityFunction[], double, double,
+    /**
+     * Declare a {@code private final ImprovedNoise} field for every active octave on
+     * every interned NoiseSpec. The flat naming convention is {@code noise_S_B_O}
+     * where {@code S} is the spec pool index, {@code B} is {@code 0} (first branch)
+     * or {@code 1} (second branch), and {@code O} is the active-octave index inside
+     * that branch. The constructor's PUTFIELD stream populates them in the same order
+     * the {@link ConstantPool#finishNoiseOctaves()} payload uses.
+     */
+    private static void emitNoiseFields(ClassWriter cw, ConstantPool pool) {
+        int specCount = pool.noiseSpecCount();
+        for (int s = 0; s < specCount; s++) {
+            var spec = pool.noiseSpec(s);
+            int firstCount = spec.first().activeOctaves().length;
+            int secondCount = spec.second().activeOctaves().length;
+            for (int o = 0; o < firstCount; o++) {
+                cw.visitField(Opcodes.ACC_PRIVATE | Opcodes.ACC_FINAL,
+                        noiseFieldName(s, 0, o), IMPROVED_NOISE_DESC, null, null).visitEnd();
+            }
+            for (int o = 0; o < secondCount; o++) {
+                cw.visitField(Opcodes.ACC_PRIVATE | Opcodes.ACC_FINAL,
+                        noiseFieldName(s, 1, o), IMPROVED_NOISE_DESC, null, null).visitEnd();
+            }
+        }
+    }
+
+    /** Stable per-octave field name used by both {@link #emitNoiseFields} and the codegen. */
+    static String noiseFieldName(int specIdx, int branch, int activeOctaveIdx) {
+        return "noise_" + specIdx + "_" + branch + "_" + activeOctaveIdx;
+    }
+
+    private static void emitConstructor(ClassWriter cw, String classInternalName, ConstantPool pool) {
+        // (double[], NormalNoise[], Object[], Object[], DensityFunction[], double, double,
         //  MethodHandle[], MethodHandle)
-        // Slot layout: this=0, constants=1, noises=2, splines=3, externs=4, minValue=5/6,
-        // maxValue=7/8, helperHandles=9, constructorMH=10.
+        // Slot layout: this=0, constants=1, noises=2, splines=3, noiseOctaves=4,
+        // externs=5, minValue=6/7, maxValue=8/9, helperHandles=10, constructorMH=11.
         MethodVisitor mv = cw.visitMethod(Opcodes.ACC_PUBLIC, "<init>", CTOR_DESC, null, null);
         mv.visitCode();
         mv.visitVarInsn(Opcodes.ALOAD, 0);
@@ -177,14 +221,54 @@ public final class Codegen {
         mv.visitVarInsn(Opcodes.ALOAD, 2);
         mv.visitVarInsn(Opcodes.ALOAD, 3);
         mv.visitVarInsn(Opcodes.ALOAD, 4);
-        mv.visitVarInsn(Opcodes.DLOAD, 5);
-        mv.visitVarInsn(Opcodes.DLOAD, 7);
-        mv.visitVarInsn(Opcodes.ALOAD, 9);
+        mv.visitVarInsn(Opcodes.ALOAD, 5);
+        mv.visitVarInsn(Opcodes.DLOAD, 6);
+        mv.visitVarInsn(Opcodes.DLOAD, 8);
         mv.visitVarInsn(Opcodes.ALOAD, 10);
+        mv.visitVarInsn(Opcodes.ALOAD, 11);
         mv.visitMethodInsn(Opcodes.INVOKESPECIAL, COMPILED_BASE_INTERNAL, "<init>", CTOR_DESC, false);
+
+        // Populate per-octave fields from the noiseOctaves[] payload. Layout matches
+        // ConstantPool.finishNoiseOctaves(): per-spec, first branch then second
+        // branch, active octaves only.
+        int cursor = 0;
+        int specCount = pool.noiseSpecCount();
+        for (int s = 0; s < specCount; s++) {
+            var spec = pool.noiseSpec(s);
+            int firstCount = spec.first().activeOctaves().length;
+            int secondCount = spec.second().activeOctaves().length;
+            for (int o = 0; o < firstCount; o++) {
+                emitOctavePutfield(mv, classInternalName, s, 0, o, cursor++);
+            }
+            for (int o = 0; o < secondCount; o++) {
+                emitOctavePutfield(mv, classInternalName, s, 1, o, cursor++);
+            }
+        }
+
         mv.visitInsn(Opcodes.RETURN);
         mv.visitMaxs(0, 0);
         mv.visitEnd();
+    }
+
+    /** Single AALOAD+CHECKCAST+PUTFIELD pair for one per-octave field. */
+    private static void emitOctavePutfield(MethodVisitor mv, String classInternalName,
+                                           int specIdx, int branch, int activeOctaveIdx, int payloadIdx) {
+        mv.visitVarInsn(Opcodes.ALOAD, 0);
+        // noiseOctaves is constructor-arg slot 4.
+        mv.visitVarInsn(Opcodes.ALOAD, 4);
+        ldcIntStatic(mv, payloadIdx);
+        mv.visitInsn(Opcodes.AALOAD);
+        mv.visitTypeInsn(Opcodes.CHECKCAST, IMPROVED_NOISE_INTERNAL);
+        mv.visitFieldInsn(Opcodes.PUTFIELD, classInternalName,
+                noiseFieldName(specIdx, branch, activeOctaveIdx), IMPROVED_NOISE_DESC);
+    }
+
+    /** Static-context twin of {@code EmitState.ldcInt} for the constructor body. */
+    private static void ldcIntStatic(MethodVisitor mv, int v) {
+        if (v >= -1 && v <= 5) mv.visitInsn(Opcodes.ICONST_0 + v);
+        else if (v >= Byte.MIN_VALUE && v <= Byte.MAX_VALUE) mv.visitIntInsn(Opcodes.BIPUSH, v);
+        else if (v >= Short.MIN_VALUE && v <= Short.MAX_VALUE) mv.visitIntInsn(Opcodes.SIPUSH, v);
+        else mv.visitLdcInsn(v);
     }
 
     /* --------------------------------------------------------------------- */
@@ -209,7 +293,7 @@ public final class Codegen {
         mv.visitCode();
         emitCoordPrologue(mv);
 
-        EmitState st = new EmitState(mv, classInternalName, helpers);
+        EmitState st = new EmitState(mv, classInternalName, helpers, false);
         st.emit(root);
 
         mv.visitInsn(Opcodes.DRETURN);
@@ -282,15 +366,17 @@ public final class Codegen {
 
         private void emitHelper(int idx, IRNode node) {
             // Helper signature uses CompiledDensityFunction (the supertype) for `self`,
-            // not the hidden class itself. This keeps the method descriptor free of
-            // self-references; field accesses inside the body use COMPILED_BASE_INTERNAL
-            // anyway since the fields are declared on the supertype.
+            // not the hidden class itself. This keeps the call-site MethodType free of
+            // hidden-class types. Subclass-only fields (e.g. per-octave ImprovedNoise)
+            // need a CHECKCAST in the emitter (see castSelfForSubclassNoiseFields).
             MethodVisitor mv = cw.visitMethod(Opcodes.ACC_PRIVATE | Opcodes.ACC_STATIC,
                     helperName(idx), HELPER_DESC, null, null);
             mv.visitCode();
             emitCoordPrologue(mv);
 
-            EmitState st = new EmitState(mv, classInternalName, this);
+            // `self` is (CompiledDensityFunction) in the descriptor; per-octave noise fields
+            // live on the hidden subclass, so emitOctaveContribution must CHECKCAST before GETFIELD.
+            EmitState st = new EmitState(mv, classInternalName, this, true);
             // Inline the body of `node` (the helper root) directly. Children that are themselves
             // extracted will route through MH.invokeExact inside emit().
             st.emitInline(node);
@@ -314,13 +400,25 @@ public final class Codegen {
         private final MethodVisitor mv;
         private final String classInternalName;
         private final HelperRegistry helpers;
+        private final ConstantPool pool;
         private final IdentityHashMap<IRNode, Integer> spillSlots = new IdentityHashMap<>();
         private int nextLocal = 5; // slots 0..4 are reserved (this/ctx/x/y/z)
+        /**
+         * True for static {@code helper_N} methods: local 0 is typed as
+         * {@link CompiledDensityFunction} in the method descriptor, but
+         * {@link #emitOctaveContribution} reads subclass-only {@code noise_*} fields.
+         * A {@code CHECKCAST} to the generated class is required for verification.
+         * {@code compute()} passes false — {@code this} is already the precise subclass.
+         */
+        private final boolean castSelfForSubclassNoiseFields;
 
-        EmitState(MethodVisitor mv, String classInternalName, HelperRegistry helpers) {
+        EmitState(MethodVisitor mv, String classInternalName, HelperRegistry helpers,
+                  boolean castSelfForSubclassNoiseFields) {
             this.mv = mv;
             this.classInternalName = classInternalName;
             this.helpers = helpers;
+            this.pool = helpers.pool;
+            this.castSelfForSubclassNoiseFields = castSelfForSubclassNoiseFields;
         }
 
         private int allocDoubleSlot() {
@@ -434,6 +532,8 @@ public final class Codegen {
                 case IRNode.ShiftB sb -> emitShiftB(sb);
                 case IRNode.Shift s -> emitShift(s);
                 case IRNode.WeirdScaled w -> emitWeirdScaled(w);
+                case IRNode.InlinedNoise n -> emitInlinedNoise(n);
+                case IRNode.WeirdRarity wr -> emitWeirdRarity(wr);
 
                 case IRNode.Spline.Constant sc -> emitConst(sc.value());
                 case IRNode.Spline.Multipoint mp -> emitMultipointSpline(mp);
@@ -676,6 +776,169 @@ public final class Codegen {
                     "(DDD)D", false);
             mv.visitLdcInsn(4.0);
             mv.visitInsn(Opcodes.DMUL);
+        }
+
+        /* ---------------- Tier-3 inlined noise emission ---------------- */
+
+        /**
+         * Emit the fully unrolled per-octave loop for a single
+         * {@link IRNode.InlinedNoise}. The shape of the bytecode is:
+         * <pre>
+         *   // Coordinate prep — emit each coord IR sub-tree once into a fresh slot
+         *   emit(coordX); DSTORE cxSlot
+         *   emit(coordY); DSTORE cySlot
+         *   emit(coordZ); DSTORE czSlot
+         *
+         *   // First branch (inputCoordScale = 1.0): octave-by-octave
+         *   //   contribution_i = ampValueFactor_i *
+         *   //                    noise_i.noise(wrap(cx*freq_i), wrap(cy*freq_i), wrap(cz*freq_i))
+         *   //   sum += contribution_i
+         *
+         *   // Second branch (inputCoordScale = NormalNoise.INPUT_FACTOR):
+         *   //   pre-scale cx/cy/cz once, then same per-octave loop
+         *
+         *   // Final: sum *= valueFactor
+         * </pre>
+         *
+         * <p>The {@code wrap} call inlines through {@link
+         * dev.denismasterherobrine.densityfunctioncompiler.compiler.runtime.Runtime#wrapAxis}
+         * and HotSpot will collapse it into the call site once the surrounding
+         * {@code compute} method gets hot.
+         */
+        private void emitInlinedNoise(IRNode.InlinedNoise n) {
+            var spec = pool.noiseSpec(n.specPoolIndex());
+            // Phase 1 — coordinate prep into private slots.
+            emit(n.coordX());
+            int cxSlot = allocDoubleSlot();
+            mv.visitVarInsn(Opcodes.DSTORE, cxSlot);
+            emit(n.coordY());
+            int cySlot = allocDoubleSlot();
+            mv.visitVarInsn(Opcodes.DSTORE, cySlot);
+            emit(n.coordZ());
+            int czSlot = allocDoubleSlot();
+            mv.visitVarInsn(Opcodes.DSTORE, czSlot);
+
+            // Phase 2 — first branch sum on top of stack.
+            emitBranchSum(spec.first(), n.specPoolIndex(), 0, cxSlot, cySlot, czSlot);
+
+            // Phase 3 — second branch sum, accumulating into Phase 2's running total.
+            // Pre-scale coords once when inputCoordScale != 1.0 (NormalNoise.INPUT_FACTOR
+            // for the second branch). Skipping the multiply on identity scale avoids
+            // burning a DLOAD/LDC/DMUL/DSTORE chain we'd never use.
+            var second = spec.second();
+            int sCx, sCy, sCz;
+            if (second.activeOctaves().length > 0 && Double.compare(second.inputCoordScale(), 1.0) != 0) {
+                sCx = allocDoubleSlot();
+                mv.visitVarInsn(Opcodes.DLOAD, cxSlot);
+                mv.visitLdcInsn(second.inputCoordScale());
+                mv.visitInsn(Opcodes.DMUL);
+                mv.visitVarInsn(Opcodes.DSTORE, sCx);
+                sCy = allocDoubleSlot();
+                mv.visitVarInsn(Opcodes.DLOAD, cySlot);
+                mv.visitLdcInsn(second.inputCoordScale());
+                mv.visitInsn(Opcodes.DMUL);
+                mv.visitVarInsn(Opcodes.DSTORE, sCy);
+                sCz = allocDoubleSlot();
+                mv.visitVarInsn(Opcodes.DLOAD, czSlot);
+                mv.visitLdcInsn(second.inputCoordScale());
+                mv.visitInsn(Opcodes.DMUL);
+                mv.visitVarInsn(Opcodes.DSTORE, sCz);
+            } else {
+                sCx = cxSlot;
+                sCy = cySlot;
+                sCz = czSlot;
+            }
+
+            int secondCount = second.activeOctaves().length;
+            for (int i = 0; i < secondCount; i++) {
+                emitOctaveContribution(n.specPoolIndex(), 1, i,
+                        second.inputFactors()[i], second.ampValueFactors()[i],
+                        sCx, sCy, sCz);
+                mv.visitInsn(Opcodes.DADD);
+            }
+
+            // Phase 4 — multiply by NormalNoise.valueFactor.
+            mv.visitLdcInsn(spec.valueFactor());
+            mv.visitInsn(Opcodes.DMUL);
+        }
+
+        /**
+         * Emit per-octave contributions for one PerlinNoise branch and leave the sum
+         * on top of the operand stack. When the branch has no active octaves the
+         * stack ends with {@code DCONST_0} so the second-branch loop's DADD chain
+         * has something to accumulate into.
+         */
+        private void emitBranchSum(dev.denismasterherobrine.densityfunctioncompiler.compiler.noise.NoiseSpec.PerlinSpec branch,
+                                   int specIdx, int branchIdx, int cxSlot, int cySlot, int czSlot) {
+            int count = branch.activeOctaves().length;
+            if (count == 0) {
+                mv.visitInsn(Opcodes.DCONST_0);
+                return;
+            }
+            // first contribution leaves a double on the stack; subsequent ones DADD.
+            for (int i = 0; i < count; i++) {
+                emitOctaveContribution(specIdx, branchIdx, i,
+                        branch.inputFactors()[i], branch.ampValueFactors()[i],
+                        cxSlot, cySlot, czSlot);
+                if (i > 0) mv.visitInsn(Opcodes.DADD);
+            }
+        }
+
+        /**
+         * Emit one octave's contribution: {@code ampValueFactor_i *
+         * noise_i.noise(wrap(cx*freq_i), wrap(cy*freq_i), wrap(cz*freq_i))}, leaving
+         * a single double on top of the operand stack.
+         *
+         * <p>Field load order matters: pushing the {@code ampValueFactor_i} constant
+         * first lets the {@code DMUL} after the {@code INVOKEVIRTUAL} stay clean —
+         * we never have to swap a long/double from below an object reference.
+         */
+        private void emitOctaveContribution(int specIdx, int branchIdx, int activeOctaveIdx,
+                                            double inputFactor, double ampValueFactor,
+                                            int cxSlot, int cySlot, int czSlot) {
+            mv.visitLdcInsn(ampValueFactor);
+            mv.visitVarInsn(Opcodes.ALOAD, 0);
+            if (castSelfForSubclassNoiseFields) {
+                mv.visitTypeInsn(Opcodes.CHECKCAST, classInternalName);
+            }
+            mv.visitFieldInsn(Opcodes.GETFIELD, classInternalName,
+                    noiseFieldName(specIdx, branchIdx, activeOctaveIdx), IMPROVED_NOISE_DESC);
+
+            mv.visitVarInsn(Opcodes.DLOAD, cxSlot);
+            mv.visitLdcInsn(inputFactor);
+            mv.visitInsn(Opcodes.DMUL);
+            mv.visitMethodInsn(Opcodes.INVOKESTATIC, RUNTIME_INTERNAL,
+                    "wrapAxis", "(D)D", false);
+
+            mv.visitVarInsn(Opcodes.DLOAD, cySlot);
+            mv.visitLdcInsn(inputFactor);
+            mv.visitInsn(Opcodes.DMUL);
+            mv.visitMethodInsn(Opcodes.INVOKESTATIC, RUNTIME_INTERNAL,
+                    "wrapAxis", "(D)D", false);
+
+            mv.visitVarInsn(Opcodes.DLOAD, czSlot);
+            mv.visitLdcInsn(inputFactor);
+            mv.visitInsn(Opcodes.DMUL);
+            mv.visitMethodInsn(Opcodes.INVOKESTATIC, RUNTIME_INTERNAL,
+                    "wrapAxis", "(D)D", false);
+
+            mv.visitMethodInsn(Opcodes.INVOKEVIRTUAL, IMPROVED_NOISE_INTERNAL,
+                    "noise", "(DDD)D", false);
+            mv.visitInsn(Opcodes.DMUL);
+        }
+
+        /**
+         * Standalone {@link IRNode.WeirdRarity} emission: just delegates to the same
+         * static helper {@link #emitWeirdScaled} previously used inline. Surfaced as
+         * its own node so {@link dev.denismasterherobrine.densityfunctioncompiler.compiler.ir.RefCount}
+         * can spill the result to a slot for the {@code abs(noise(x/r,y/r,z/r)) * r}
+         * fan-out (4 uses).
+         */
+        private void emitWeirdRarity(IRNode.WeirdRarity wr) {
+            emit(wr.input());
+            ldcInt(wr.rarityValueMapperOrdinal());
+            mv.visitMethodInsn(Opcodes.INVOKESTATIC, RUNTIME_INTERNAL,
+                    "weirdRarity", "(DI)D", false);
         }
 
         private void emitWeirdScaled(IRNode.WeirdScaled w) {

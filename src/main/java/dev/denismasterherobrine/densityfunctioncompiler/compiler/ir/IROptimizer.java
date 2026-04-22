@@ -63,14 +63,20 @@ public final class IROptimizer {
     public static Result optimize(IRNode root, IRBuilder builder, ConstantPool pool) {
         IROptimizer opt = new IROptimizer(builder, pool);
         int iterationsThatRewrote = 0;
+        // One RefCount up front; recompute only after a successful rewrite (the graph
+        // is unchanged when !changed, so the previous snapshot stays valid).
+        RefCount.Result rc = RefCount.compute(root);
         for (int iter = 0; iter < MAX_ITERATIONS; iter++) {
-            opt.refSnapshot = RefCount.compute(root).refs();
+            opt.refSnapshot = rc.refs();
             opt.memo = new IdentityHashMap<>();
             opt.changed = false;
             IRNode next = opt.rewrite(root);
-            if (!opt.changed) break;
+            if (!opt.changed) {
+                return new Result(root, iterationsThatRewrote);
+            }
             iterationsThatRewrote++;
             root = next;
+            rc = RefCount.compute(root);
         }
         return new Result(root, iterationsThatRewrote);
     }
@@ -133,6 +139,19 @@ public final class IROptimizer {
                         ? w
                         : intern(new IRNode.WeirdScaled(in, w.noiseIndex(),
                                 w.rarityValueMapperOrdinal(), w.maxValue()));
+            }
+            case IRNode.InlinedNoise n -> {
+                IRNode cx = rewrite(n.coordX());
+                IRNode cy = rewrite(n.coordY());
+                IRNode cz = rewrite(n.coordZ());
+                yield (cx == n.coordX() && cy == n.coordY() && cz == n.coordZ())
+                        ? n
+                        : intern(new IRNode.InlinedNoise(n.specPoolIndex(), cx, cy, cz, n.maxValue()));
+            }
+            case IRNode.WeirdRarity wr -> {
+                IRNode in = rewrite(wr.input());
+                yield in == wr.input() ? wr
+                        : intern(new IRNode.WeirdRarity(in, wr.rarityValueMapperOrdinal()));
             }
             case IRNode.Spline.Multipoint mp -> {
                 IRNode coord = rewrite(mp.coordinate());

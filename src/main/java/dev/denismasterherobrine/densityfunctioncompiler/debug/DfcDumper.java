@@ -33,10 +33,11 @@ public final class DfcDumper {
         src.sendSuccess(() -> Component.literal(
                 ("DFC dump: %d compiled roots, %d unique IR nodes, %d hidden classes alive, "
                         + "%d node references collapsed by CSE, %d helper methods emitted, "
-                        + "%d optimizer rewrite passes")
+                        + "%d optimizer rewrite passes, %d noises inlined (%d octaves unrolled)")
                         .formatted(stats.rootsCompiled(), stats.uniqueNodes(),
                                 stats.classesAlive(), stats.savedByCse(),
-                                stats.helpersEmitted(), stats.optimizerRewrites())), false);
+                                stats.helpersEmitted(), stats.optimizerRewrites(),
+                                stats.noisesInlined(), stats.octavesInlined())), false);
     }
 
     /**

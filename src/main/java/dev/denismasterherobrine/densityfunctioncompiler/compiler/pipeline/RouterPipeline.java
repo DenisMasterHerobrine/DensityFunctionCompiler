@@ -5,8 +5,11 @@ import net.minecraft.world.level.biome.Climate;
 import net.minecraft.world.level.levelgen.DensityFunction;
 import net.minecraft.world.level.levelgen.NoiseRouter;
 
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.ForkJoinPool;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
+import java.util.stream.IntStream;
 
 /**
  * Top-level orchestration for replacing every {@link NoiseRouter} field with a compiled
@@ -26,8 +29,69 @@ public final class RouterPipeline {
      *  pass is mostly an identity walk; a high value suggests the upstream JSON
      *  is leaving a lot of foldable structure on the table. */
     private static final AtomicLong OPT_REWRITES_TOTAL = new AtomicLong();
+    /** Cumulative count of {@code NormalNoise} instances that were specialised
+     *  away by the Tier-3 noise inlining pass. Each specialisation replaces one
+     *  {@code INVOKEVIRTUAL NormalNoise.getValue} call site with a fully unrolled
+     *  per-octave loop, so this number directly correlates with the eliminated
+     *  megamorphic call-site count in the steady-state evaluator. */
+    private static final AtomicLong NOISES_INLINED_TOTAL = new AtomicLong();
+    /** Cumulative count of individual {@code ImprovedNoise} octaves whose
+     *  contribution was unrolled inline. Tracks the actual size win — a single
+     *  noise with 8 active octaves contributes 8 here, while a 1-octave noise
+     *  contributes 1, even though both bump {@link #NOISES_INLINED_TOTAL} the
+     *  same amount. */
+    private static final AtomicLong OCTAVES_INLINED_TOTAL = new AtomicLong();
+
+    /**
+     * Compiles each router / sampler top-level field in parallel. A task running in
+     * this pool causes {@code IntStream.parallel} to use it (not the common pool), so
+     * we get bounded parallelism and avoid piling work onto unrelated FJP clients.
+     */
+    private static final ForkJoinPool ROUTER_FIELD_POOL = new ForkJoinPool(
+            Math.min(8, Math.max(1, Runtime.getRuntime().availableProcessors())));
 
     private RouterPipeline() {}
+
+    private static void compileFieldsParallel(CompilingVisitor visitor, DensityFunction[] sources,
+            DensityFunction[] compiled, int n, String failureKind) {
+        try {
+            ROUTER_FIELD_POOL.submit((Runnable) () -> IntStream.range(0, n).parallel().forEach(i -> {
+                DensityFunction src = sources[i];
+                try {
+                    compiled[i] = visitor.apply(src);
+                } catch (Throwable t) {
+                    DensityFunctionCompiler.LOGGER.debug(
+                            "RouterPipeline.{} failed for field {} (will retry on next access); "
+                                    + "this is normal when registries are not yet bound.",
+                            failureKind, i, t);
+                    compiled[i] = src;
+                }
+            })).get();
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            compileFieldsSequential(visitor, sources, compiled, n, failureKind);
+        } catch (ExecutionException e) {
+            DensityFunctionCompiler.LOGGER.debug(
+                    "RouterPipeline: parallel " + failureKind + " failed; using sequential", e.getCause());
+            compileFieldsSequential(visitor, sources, compiled, n, failureKind);
+        }
+    }
+
+    private static void compileFieldsSequential(CompilingVisitor visitor, DensityFunction[] sources,
+            DensityFunction[] compiled, int n, String failureKind) {
+        for (int i = 0; i < n; i++) {
+            DensityFunction src = sources[i];
+            try {
+                compiled[i] = visitor.apply(src);
+            } catch (Throwable t) {
+                DensityFunctionCompiler.LOGGER.debug(
+                        "RouterPipeline.{} failed for field {} (will retry on next access); "
+                                + "this is normal when registries are not yet bound.",
+                        failureKind, i, t);
+                compiled[i] = src;
+            }
+        }
+    }
 
     /**
      * Compile each of the {@link NoiseRouter}'s 15 root fields independently and return a
@@ -71,20 +135,13 @@ public final class RouterPipeline {
                 original.veinRidged(),
                 original.veinGap(),
         };
+        compileFieldsParallel(visitor, sources, compiled, sources.length, "compile");
         boolean anyChanged = false;
         for (int i = 0; i < sources.length; i++) {
-            DensityFunction src = sources[i];
-            DensityFunction out;
-            try {
-                out = visitor.apply(src);
-            } catch (Throwable t) {
-                DensityFunctionCompiler.LOGGER.debug(
-                        "RouterPipeline.compile failed for field {} (will retry on next access); "
-                                + "this is normal when registries are not yet bound.", i, t);
-                out = src;
+            if (compiled[i] != sources[i]) {
+                anyChanged = true;
+                break;
             }
-            compiled[i] = out;
-            if (out != src) anyChanged = true;
         }
         if (!anyChanged) {
             return original;
@@ -128,20 +185,13 @@ public final class RouterPipeline {
                 original.weirdness(),
         };
         DensityFunction[] compiled = new DensityFunction[6];
+        compileFieldsParallel(visitor, sources, compiled, sources.length, "compileSampler");
         boolean anyChanged = false;
         for (int i = 0; i < sources.length; i++) {
-            DensityFunction src = sources[i];
-            DensityFunction out;
-            try {
-                out = visitor.apply(src);
-            } catch (Throwable t) {
-                DensityFunctionCompiler.LOGGER.debug(
-                        "RouterPipeline.compileSampler failed for climate field {} "
-                                + "(falling back to vanilla evaluator)", i, t);
-                out = src;
+            if (compiled[i] != sources[i]) {
+                anyChanged = true;
+                break;
             }
-            compiled[i] = out;
-            if (out != src) anyChanged = true;
         }
         if (!anyChanged) {
             return original;
@@ -167,12 +217,23 @@ public final class RouterPipeline {
         if (rewrites > 0) OPT_REWRITES_TOTAL.addAndGet(rewrites);
     }
 
+    /**
+     * Tier 3: record one compiled root's noise-inlining contribution. {@code noisesSpecialized}
+     * counts {@code NormalNoise} instances whose {@code getValue} call was replaced by an
+     * unrolled per-octave loop; {@code octavesUnrolled} sums per-instance active-octave counts.
+     */
+    public static void recordNoiseInline(int noisesSpecialized, int octavesUnrolled) {
+        if (noisesSpecialized > 0) NOISES_INLINED_TOTAL.addAndGet(noisesSpecialized);
+        if (octavesUnrolled > 0) OCTAVES_INLINED_TOTAL.addAndGet(octavesUnrolled);
+    }
+
     public static void recordCompiledClassDropped() {
         CLASSES_ALIVE.decrementAndGet();
     }
 
     public record Stats(int rootsCompiled, int classesAlive, long uniqueNodes,
-                         long savedByCse, long helpersEmitted, long optimizerRewrites) {}
+                         long savedByCse, long helpersEmitted, long optimizerRewrites,
+                         long noisesInlined, long octavesInlined) {}
 
     public static Stats snapshotStats() {
         return new Stats(
@@ -181,6 +242,8 @@ public final class RouterPipeline {
                 UNIQUE_NODES_TOTAL.get(),
                 CSE_SAVINGS_TOTAL.get(),
                 HELPERS_TOTAL.get(),
-                OPT_REWRITES_TOTAL.get());
+                OPT_REWRITES_TOTAL.get(),
+                NOISES_INLINED_TOTAL.get(),
+                OCTAVES_INLINED_TOTAL.get());
     }
 }

@@ -59,14 +59,19 @@ public final class Splitter {
      * generated helper instead of being inlined.
      */
     public static Set<IRNode> plan(IRNode root, RefCount.Result rc) {
+        return plan(root, rc, null);
+    }
+
+    /** Plan extraction with a {@link ConstantPool} so {@link SizeEstimator} can size InlinedNoise nodes accurately. */
+    public static Set<IRNode> plan(IRNode root, RefCount.Result rc, ConstantPool pool) {
         Set<IRNode> extracted = Collections.newSetFromMap(new IdentityHashMap<>());
-        SizeEstimator est = new SizeEstimator();
+        SizeEstimator est = new SizeEstimator(pool);
 
         // Phase 1: every Spline.Multipoint is its own helper.
         walkUnique(root, n -> {
             if (n instanceof IRNode.Spline.Multipoint) extracted.add(n);
         });
-        est.invalidate();
+        // No invalidate here: SizeEstimator is unused until phase 2 (no sizing in phase 1).
 
         // Phase 2: CSE-shared nodes with big inline footprint -> helpers.
         walkUnique(root, n -> {

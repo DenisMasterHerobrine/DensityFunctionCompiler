@@ -56,6 +56,8 @@ public final class RefCount {
             case IRNode.RangeChoice rc -> List.of(rc.input(), rc.whenInRange(), rc.whenOutOfRange());
             case IRNode.ShiftedNoise sn -> List.of(sn.shiftX(), sn.shiftY(), sn.shiftZ());
             case IRNode.WeirdScaled w -> List.of(w.input());
+            case IRNode.InlinedNoise in -> List.of(in.coordX(), in.coordY(), in.coordZ());
+            case IRNode.WeirdRarity wr -> List.of(wr.input());
             case IRNode.Spline.Multipoint mp -> {
                 List<IRNode> all = new ArrayList<>(mp.values().size() + 1);
                 all.add(mp.coordinate());

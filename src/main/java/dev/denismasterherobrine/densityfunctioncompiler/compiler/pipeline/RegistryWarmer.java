@@ -2,12 +2,15 @@ package dev.denismasterherobrine.densityfunctioncompiler.compiler.pipeline;
 
 import dev.denismasterherobrine.densityfunctioncompiler.DensityFunctionCompiler;
 import dev.denismasterherobrine.densityfunctioncompiler.compiler.codegen.CompiledDensityFunction;
+import net.minecraft.core.HolderGetter;
 import net.minecraft.core.Registry;
 import net.minecraft.core.registries.Registries;
 import net.minecraft.server.MinecraftServer;
 import net.minecraft.world.level.levelgen.DensityFunction;
 import net.minecraft.world.level.levelgen.NoiseGeneratorSettings;
 import net.minecraft.world.level.levelgen.NoiseRouter;
+import net.minecraft.world.level.levelgen.RandomState;
+import net.minecraft.world.level.levelgen.synth.NormalNoise;
 
 /**
  * Pre-warms the JIT cache after the registries have been bound.
@@ -16,10 +19,15 @@ import net.minecraft.world.level.levelgen.NoiseRouter;
  * {@code OnDatapackSyncEvent}, because reload rebuilds the registries) — by which
  * point every {@link net.minecraft.core.Holder.Reference Holder.Reference} into
  * {@link Registries#DENSITY_FUNCTION} is resolvable. That makes it the right place to
- * (a) walk every {@link NoiseGeneratorSettings} and trigger its lazy
- * {@link NoiseRouter} compilation up-front, and (b) compile every standalone
- * {@code DensityFunction} so any future router that points at it gets a hot cache
- * lookup instead of a cold ASM emit.
+ * (a) construct a {@link RandomState} for every {@link NoiseGeneratorSettings} so the
+ * {@link dev.denismasterherobrine.densityfunctioncompiler.mixin.RandomStateMixin RandomStateMixin}
+ * runs the same wired {@link NoiseRouter} compile as real worldgen, and (b) compile every
+ * standalone {@code DensityFunction} so any future router that points at it gets a hot
+ * cache lookup instead of a cold ASM emit.
+ *
+ * <p>We cannot use {@link NoiseGeneratorSettings#noiseRouter()} alone: that returns the
+ * static data-pack template, which is never replaced in place. Compilation only runs at
+ * the end of {@link RandomState}'s constructor after {@code mapAll(NoiseWiringHelper)}.
  *
  * <p>Without this step, the first chunk to spawn would pay the entire compile cost on
  * the chunk-gen worker thread — that's a multi-hundred-millisecond stall per noise
@@ -33,9 +41,7 @@ public final class RegistryWarmer {
         if (server == null) {
             return;
         }
-        // Trigger router compilation on every NoiseGeneratorSettings first — this is
-        // what actually makes worldgen faster. Reading .noiseRouter() fires our
-        // lazy mixin; it swaps the field in-place to the compiled NoiseRouter.
+        // Trigger the same RandomState + wired router compile as production (mixin@RETURN).
         warmNoiseSettings(server);
         // Then compile any density functions that aren't reachable from a router
         // (mod-added DFs registered for use elsewhere). Idempotent w.r.t. the
@@ -47,27 +53,32 @@ public final class RegistryWarmer {
         try {
             Registry<NoiseGeneratorSettings> registry = server.registryAccess()
                     .registryOrThrow(Registries.NOISE_SETTINGS);
+            HolderGetter<NormalNoise.NoiseParameters> noiseGetter =
+                    server.registryAccess().lookupOrThrow(Registries.NOISE);
+            long levelSeed = server.overworld().getSeed();
+
             int total = 0;
             int compiled = 0;
             int failed = 0;
             for (NoiseGeneratorSettings settings : registry) {
                 total++;
                 try {
-                    NoiseRouter router = settings.noiseRouter();
-                    if (containsAnyCompiled(router)) {
+                    // Matches production: wiring + RandomStateMixin compile at <init> RETURN.
+                    RandomState state = RandomState.create(settings, noiseGetter, levelSeed);
+                    if (containsAnyCompiled(state.router())) {
                         compiled++;
                     }
                 } catch (Throwable settingsErr) {
                     failed++;
                     DensityFunctionCompiler.LOGGER.debug(
-                            "DFC: warm-up couldn't compile a NoiseGeneratorSettings router; skipping",
+                            "DFC: warm-up couldn't build RandomState for a noise_settings entry; skipping",
                             settingsErr);
                 }
             }
             DensityFunctionCompiler.LOGGER.info(
-                    "DFC: warmed {}/{} noise_settings router(s){}",
+                    "DFC: warmed {}/{} noise_settings (RandomState + wired router compile){}",
                     compiled, total,
-                    failed == 0 ? "" : " (" + failed + " failed)");
+                    failed == 0 ? "" : " (" + failed + " throws)");
         } catch (Throwable t) {
             DensityFunctionCompiler.LOGGER.warn(
                     "DFC: noise_settings warm-up failed; lazy compilation will still pick up callers.", t);

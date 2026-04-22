@@ -83,6 +83,41 @@ public sealed interface IRNode {
             implements IRNode {}
 
     /**
+     * Fully unrolled, octave-baked replacement for {@link Noise} / {@link ShiftedNoise} /
+     * {@link ShiftA} / {@link ShiftB} / {@link Shift} produced by
+     * {@link NoiseExpander}. The {@code specPoolIndex} keys into {@link
+     * dev.denismasterherobrine.densityfunctioncompiler.compiler.codegen.ConstantPool}'s
+     * parallel {@link dev.denismasterherobrine.densityfunctioncompiler.compiler.noise.NoiseSpec}
+     * list; the codegen emits the per-octave loop fully unrolled with LDC'd constants and
+     * per-octave {@code GETFIELD} on the generated class's typed
+     * {@code ImprovedNoise} fields.
+     *
+     * <p>The three coordinate sub-IR nodes are exactly what would otherwise be emitted as
+     * the {@code (x*xz, y*yScale, z*xz)} expression for {@link Noise}, the
+     * {@code (x*xz + shiftX, y*yScale + shiftY, z*xz + shiftZ)} expression for
+     * {@link ShiftedNoise}, etc. Surfacing them as IR lets {@link IROptimizer}'s second
+     * pass and {@link RefCount} / {@code Splitter} share them across multiple
+     * {@code InlinedNoise} call sites that happen to want the same coordinates (very
+     * common for scale-1.0 chains that all sample at {@code (x, y, z)}).
+     *
+     * <p>{@code maxValue} is the propagated {@link NormalNoise#maxValue()} — needed by
+     * {@link Bounds} for downstream short-circuiting; it would otherwise have to round-trip
+     * through the constant pool, which is awkward when the spec hasn't yet been keyed in.
+     */
+    record InlinedNoise(int specPoolIndex, IRNode coordX, IRNode coordY, IRNode coordZ,
+                        double maxValue) implements IRNode {}
+
+    /**
+     * Standalone {@code WeirdScaledSampler} rarity-mapping IR node. Produced by
+     * {@link NoiseExpander} as the {@code rarity} factor of the
+     * {@code abs(noise(...)) * rarity(input)} decomposition; carries just enough to emit
+     * the {@code Runtime.weirdRarity} static call. Lives as its own node (rather than
+     * being inlined back into a {@link Bin}) so {@link RefCount} / {@code Splitter} see
+     * the single materialised double instead of duplicating the input through every use.
+     */
+    record WeirdRarity(IRNode input, int rarityValueMapperOrdinal) implements IRNode {}
+
+    /**
      * {@link DensityFunctions.EndIslandDensityFunction}. Captured as an opaque extern
      * because its core relies on a precomputed simplex-noise grid; the compiler simply
      * delegates to a captured instance through INVOKEVIRTUAL.

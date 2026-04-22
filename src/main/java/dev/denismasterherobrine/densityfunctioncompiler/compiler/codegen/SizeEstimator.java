@@ -40,8 +40,19 @@ final class SizeEstimator {
 
     private final IdentityHashMap<IRNode, Integer> sizes = new IdentityHashMap<>();
     private Set<IRNode> extracted = Set.of();
+    private final ConstantPool pool;
 
-    SizeEstimator() {}
+    SizeEstimator() { this(null); }
+
+    /**
+     * @param pool optional pool used to size {@link IRNode.InlinedNoise} nodes accurately
+     *             (per-octave count is encoded in the spec). Pass {@code null} when sizing
+     *             before the noise expander has run; in that case the InlinedNoise branch
+     *             will fall back to a conservative estimate.
+     */
+    SizeEstimator(ConstantPool pool) {
+        this.pool = pool;
+    }
 
     /** Drop the memo so a new {@code extracted} mask is recomputed properly. */
     void invalidate() {
@@ -153,6 +164,50 @@ final class SizeEstimator {
             case IRNode.WeirdScaled w -> {
                 int in = treatAllChildrenAsExtracted ? CALL_SITE_BYTES : sizeOfChild(w.input());
                 int self = 70; // INVOKESTATIC weirdRarity + spill + 3x (ILOAD/I2D + DLOAD + DDIV) + GETFIELD/AALOAD + INVOKEVIRTUAL + abs + DMUL
+                int spill = isSpillCandidate(node) ? 4 : 0;
+                yield in + self + spill;
+            }
+            case IRNode.InlinedNoise n -> {
+                // Coord prep: 3 sub-trees + 3 DSTOREs (3 bytes each).
+                int cx = treatAllChildrenAsExtracted ? CALL_SITE_BYTES : sizeOfChild(n.coordX());
+                int cy = treatAllChildrenAsExtracted ? CALL_SITE_BYTES : sizeOfChild(n.coordY());
+                int cz = treatAllChildrenAsExtracted ? CALL_SITE_BYTES : sizeOfChild(n.coordZ());
+                int coordPrep = cx + cy + cz + 9;
+
+                int firstOctaves;
+                int secondOctaves;
+                boolean secondPreScaleNeeded;
+                if (pool != null) {
+                    var spec = pool.noiseSpec(n.specPoolIndex());
+                    firstOctaves = spec.first().activeOctaves().length;
+                    secondOctaves = spec.second().activeOctaves().length;
+                    secondPreScaleNeeded = secondOctaves > 0
+                            && Double.compare(spec.second().inputCoordScale(), 1.0) != 0;
+                } else {
+                    // Conservative pre-spec estimate: assume worst-case 8 active octaves
+                    // per branch (vanilla noises top out around there) and assume the
+                    // second branch always needs a pre-scale.
+                    firstOctaves = 8;
+                    secondOctaves = 8;
+                    secondPreScaleNeeded = true;
+                }
+
+                // Per octave: LDC ampVF + ALOAD/GETFIELD + 3x (DLOAD + LDC + DMUL +
+                // INVOKESTATIC wrap) + INVOKEVIRTUAL noise + DMUL + DADD ≈ 65 bytes.
+                int perOctave = 65;
+                // Second branch pre-scale (3x DLOAD/LDC/DMUL/DSTORE).
+                int secondPreScale = secondPreScaleNeeded ? 30 : 0;
+                // DCONST_0 fallback (1 byte) if a branch has zero octaves.
+                int branchOverhead = (firstOctaves == 0 ? 1 : 0) + (secondOctaves == 0 ? 1 : 0);
+                // Final valueFactor multiply: LDC + DMUL = 4 bytes.
+                int valueFactor = 4;
+                int self = (firstOctaves + secondOctaves) * perOctave + secondPreScale + branchOverhead + valueFactor;
+                int spill = isSpillCandidate(node) ? 4 : 0;
+                yield coordPrep + self + spill;
+            }
+            case IRNode.WeirdRarity wr -> {
+                int in = treatAllChildrenAsExtracted ? CALL_SITE_BYTES : sizeOfChild(wr.input());
+                int self = 5; // ldcInt ordinal (1-3) + INVOKESTATIC weirdRarity (3)
                 int spill = isSpillCandidate(node) ? 4 : 0;
                 yield in + self + spill;
             }

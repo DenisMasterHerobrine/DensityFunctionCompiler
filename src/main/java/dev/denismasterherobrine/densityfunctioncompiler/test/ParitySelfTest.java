@@ -3,8 +3,14 @@ package dev.denismasterherobrine.densityfunctioncompiler.test;
 import dev.denismasterherobrine.densityfunctioncompiler.DensityFunctionCompiler;
 import dev.denismasterherobrine.densityfunctioncompiler.compiler.Compiler;
 import dev.denismasterherobrine.densityfunctioncompiler.debug.DfcDumper;
+import net.minecraft.commands.CommandSourceStack;
+import net.minecraft.core.Registry;
+import net.minecraft.core.registries.Registries;
+import net.minecraft.resources.ResourceLocation;
 import net.minecraft.world.level.levelgen.DensityFunction;
 import net.minecraft.world.level.levelgen.DensityFunctions;
+import net.minecraft.world.level.levelgen.NoiseGeneratorSettings;
+import net.minecraft.world.level.levelgen.NoiseRouter;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -160,5 +166,84 @@ public final class ParitySelfTest {
         out.add(new Case("max_xx(yc.abs())", DensityFunctions.max(sharedAbs, sharedAbs)));
 
         return out;
+    }
+
+    /**
+     * Tier-3 noise inlining parity. Unlike {@link #runArithmeticSubset()} this
+     * <em>requires</em> a running server: the test cases pull live router fields out
+     * of the registered {@link NoiseGeneratorSettings} so that every {@link
+     * net.minecraft.world.level.levelgen.synth.NormalNoise} they reference is already
+     * bound by {@code RandomState.<init>}. Compiling against the registry-bound DFs
+     * also exercises {@link
+     * dev.denismasterherobrine.densityfunctioncompiler.compiler.noise.NoiseSpecCache}'s
+     * mixin-based extraction, which is the path that fails most loudly when a future
+     * MC release changes a {@code NormalNoise}/{@code PerlinNoise} field name.
+     *
+     * <p>We sample {@code 1024} random points per case (smaller than the arithmetic
+     * subset's {@code 5000} to keep the bench affordable on the server tick thread)
+     * and require {@code maxAbsDiff < 1e-9}. The wider arithmetic chains in router
+     * fields like {@code finalDensity} can drift by a few ULPs across architectures,
+     * so noise-only fields ({@code barrier}, {@code lava}, {@code temperature}) are
+     * preferred over composites — they leave {@code maxAbsDiff} dominated by the
+     * one inlined noise per call, which we expect to be bit-exact.
+     */
+    public static SuiteResult runNoiseSubset(CommandSourceStack src) {
+        var server = src.getServer();
+        if (server == null) {
+            return new SuiteResult(0, 0, List.of("noise self-test needs a running server"));
+        }
+        Registry<NoiseGeneratorSettings> reg;
+        try {
+            reg = server.registryAccess().registryOrThrow(Registries.NOISE_SETTINGS);
+        } catch (Throwable t) {
+            return new SuiteResult(0, 0, List.of("noise_settings registry unavailable: " + t));
+        }
+        // We pin to vanilla overworld; if the registry hasn't loaded it (e.g. a
+        // datapack stripped vanilla worldgen) we surface that as a single test
+        // failure rather than crashing the command.
+        ResourceLocation overworldId = ResourceLocation.fromNamespaceAndPath("minecraft", "overworld");
+        NoiseGeneratorSettings ngs = reg.get(overworldId);
+        if (ngs == null) {
+            return new SuiteResult(1, 0, List.of("vanilla overworld noise_settings missing"));
+        }
+        NoiseRouter router = ngs.noiseRouter();
+
+        List<Case> cases = new ArrayList<>();
+        // Direct noise() — unwraps to one InlinedNoise.
+        cases.add(new Case("router.barrier (noise)", router.barrierNoise()));
+        cases.add(new Case("router.lava (noise)", router.lavaNoise()));
+        cases.add(new Case("router.fluidLevelFloodedness (noise)", router.fluidLevelFloodednessNoise()));
+        cases.add(new Case("router.fluidLevelSpread (noise)", router.fluidLevelSpreadNoise()));
+        // shiftedNoise2d — InlinedNoise wrapped over a (x*scale + shiftX) coord chain.
+        cases.add(new Case("router.temperature (shiftedNoise2d)", router.temperature()));
+        cases.add(new Case("router.vegetation (shiftedNoise2d)", router.vegetation()));
+        cases.add(new Case("router.continents (shiftedNoise2d)", router.continents()));
+        cases.add(new Case("router.erosion (shiftedNoise2d)", router.erosion()));
+        // Ridges — pulls in the WeirdScaled / WeirdRarity decomposition path
+        // (abs(InlinedNoise(coord/r)) * weirdRarity(InlinedNoise(coord), ord)).
+        cases.add(new Case("router.ridges (mixed)", router.ridges()));
+
+        List<String> failures = new ArrayList<>();
+        int passed = 0;
+        int total = 0;
+        for (Case c : cases) {
+            total++;
+            try {
+                DensityFunction compiled = Compiler.compile(c.df);
+                DfcDumper.ParitySample s = DfcDumper.sampleParity(c.df, compiled, 1024, 0xC0FFEE_DECAFL ^ total);
+                if (s.maxAbsDiff() > 1e-9) {
+                    failures.add(c.name + ": maxDiff=" + s.maxAbsDiff() + " (samples=" + s.samples() + ")");
+                } else {
+                    passed++;
+                }
+            } catch (Throwable t) {
+                failures.add(c.name + ": exception " + t);
+            }
+        }
+        DensityFunctionCompiler.LOGGER.info("DFC noise self-test: {}/{} passed", passed, total);
+        for (String f : failures) {
+            DensityFunctionCompiler.LOGGER.warn("  noise fail: {}", f);
+        }
+        return new SuiteResult(total, passed, failures);
     }
 }

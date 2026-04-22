@@ -41,5 +41,24 @@ public final class Runtime {
         if (p <  0.5)  return 1.0;
         return p < 0.75 ? 2.0 : 3.0;
     }
+
+    /**
+     * Mirror of {@link net.minecraft.world.level.levelgen.synth.PerlinNoise#wrap}
+     * inlined into the unrolled per-octave bytecode. Vanilla {@code PerlinNoise} uses
+     * {@code Mth.lfloor(value / 33554432.0 + 0.5)} to floor the quotient before
+     * subtracting; we reproduce {@code Mth.lfloor} bit-for-bit (truncating-cast then
+     * decrement when the original value sits below the truncated long) so the wrap
+     * result is identical to what vanilla's evaluator computes.
+     *
+     * <p>The constant {@code 33554432.0} is {@code 2^25}; the divisor / multiplier
+     * pair caps the wrapped magnitude at {@code 2^24}, well within the precision
+     * range where ImprovedNoise's lookup tables behave correctly.
+     */
+    public static double wrapAxis(double v) {
+        double scaled = v / 33554432.0 + 0.5;
+        long truncated = (long) scaled;
+        long floored = scaled < (double) truncated ? truncated - 1L : truncated;
+        return v - (double) floored * 33554432.0;
+    }
 }
 

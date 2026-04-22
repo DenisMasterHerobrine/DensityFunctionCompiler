@@ -3,12 +3,18 @@ package dev.denismasterherobrine.densityfunctioncompiler.compiler.ir;
 import dev.denismasterherobrine.densityfunctioncompiler.compiler.codegen.ConstantPool;
 import net.minecraft.world.level.dimension.DimensionType;
 
+import java.util.IdentityHashMap;
+
 /**
  * Interval-arithmetic propagation that mirrors vanilla
  * {@link net.minecraft.world.level.levelgen.DensityFunctions} {@code minValue}/{@code
  * maxValue} computation. The compiled function exposes the result so that anything that
  * uses these bounds (range-choice short-circuiting, surface-rule thresholds) sees
  * identical numbers.
+ *
+ * <p>Interval results are {@link IdentityHashMap memoized} per top-level
+ * {@link #interval} call: the IR is a DAG, so a naive recursion revisits shared nodes on
+ * every path and blows up to exponential work without caching.
  */
 public final class Bounds {
     private Bounds() {}
@@ -22,25 +28,34 @@ public final class Bounds {
     }
 
     public static double[] interval(IRNode node, ConstantPool pool) {
-        return switch (node) {
+        IdentityHashMap<IRNode, double[]> memo = new IdentityHashMap<>();
+        return intervalImpl(node, pool, memo);
+    }
+
+    private static double[] intervalImpl(IRNode node, ConstantPool pool, IdentityHashMap<IRNode, double[]> memo) {
+        double[] hit = memo.get(node);
+        if (hit != null) {
+            return hit;
+        }
+        double[] out = switch (node) {
             case IRNode.Const c -> new double[]{c.value(), c.value()};
             case IRNode.BlockX bx -> new double[]{DimensionType.MIN_Y * 2, DimensionType.MAX_Y * 2};
             case IRNode.BlockY by -> new double[]{DimensionType.MIN_Y * 2, DimensionType.MAX_Y * 2};
             case IRNode.BlockZ bz -> new double[]{DimensionType.MIN_Y * 2, DimensionType.MAX_Y * 2};
 
-            case IRNode.Bin bin -> binInterval(bin, pool);
-            case IRNode.Unary u -> unaryInterval(u, pool);
+            case IRNode.Bin bin -> binInterval(bin, pool, memo);
+            case IRNode.Unary u -> unaryInterval(u, pool, memo);
 
             case IRNode.Clamp cl -> {
-                double[] in = interval(cl.input(), pool);
+                double[] in = intervalImpl(cl.input(), pool, memo);
                 yield new double[]{
                         Math.max(cl.min(), Math.min(cl.max(), in[0])),
                         Math.max(cl.min(), Math.min(cl.max(), in[1]))};
             }
 
             case IRNode.RangeChoice rc -> {
-                double[] hi = interval(rc.whenInRange(), pool);
-                double[] lo = interval(rc.whenOutOfRange(), pool);
+                double[] hi = intervalImpl(rc.whenInRange(), pool, memo);
+                double[] lo = intervalImpl(rc.whenOutOfRange(), pool, memo);
                 yield new double[]{Math.min(hi[0], lo[0]), Math.max(hi[1], lo[1])};
             }
 
@@ -54,6 +69,19 @@ public final class Bounds {
             case IRNode.Shift s -> new double[]{-s.maxValue() * 4.0, s.maxValue() * 4.0};
 
             case IRNode.WeirdScaled w -> new double[]{0.0, w.maxValue()};
+            // Inlined unrolled noise has the same bounds as the un-inlined NormalNoise
+            // it replaces — symmetric around 0 with magnitude `maxValue` (which is the
+            // propagated NormalNoise.maxValue() captured at NoiseExpander time, so even
+            // routers that sample noise at multiple scales bound correctly).
+            case IRNode.InlinedNoise n -> new double[]{-n.maxValue(), n.maxValue()};
+            // WeirdRarity codomain is fixed by the rarity-table values in
+            // Runtime.weirdRarity: {0.5, 0.75, 1.0, 1.5, 2.0, 3.0}. The widest
+            // ordinal-2 (RarityValueMapper.TYPE2/2D) hits 3.0; ordinal-1 (TYPE1/3D)
+            // tops out at 2.0. Either way the lower bound is 0.5. Bounds.interval is
+            // intentionally loose (matches DensityFunctions.WeirdScaledSampler's own
+            // [0, maxValue] policy) but tighter than [-Inf, Inf] which would defeat
+            // RangeChoice short-circuiting.
+            case IRNode.WeirdRarity wr -> new double[]{0.5, wr.rarityValueMapperOrdinal() == 0 ? 2.0 : 3.0};
             case IRNode.EndIslands e -> new double[]{-0.84375, 0.5625};
 
             case IRNode.Spline.Constant sc -> new double[]{sc.value(), sc.value()};
@@ -70,11 +98,13 @@ public final class Bounds {
             case IRNode.BlendDensity bd ->
                     new double[]{Double.NEGATIVE_INFINITY, Double.POSITIVE_INFINITY};
         };
+        memo.put(node, out);
+        return out;
     }
 
-    private static double[] binInterval(IRNode.Bin bin, ConstantPool pool) {
-        double[] a = interval(bin.left(), pool);
-        double[] b = interval(bin.right(), pool);
+    private static double[] binInterval(IRNode.Bin bin, ConstantPool pool, IdentityHashMap<IRNode, double[]> memo) {
+        double[] a = intervalImpl(bin.left(), pool, memo);
+        double[] b = intervalImpl(bin.right(), pool, memo);
         double a0 = a[0], a1 = a[1], b0 = b[0], b1 = b[1];
         return switch (bin.op()) {
             case ADD -> new double[]{a0 + b0, a1 + b1};
@@ -82,21 +112,23 @@ public final class Bounds {
             case MUL -> {
                 double c1 = a0 * b0, c2 = a0 * b1, c3 = a1 * b0, c4 = a1 * b1;
                 yield new double[]{Math.min(Math.min(c1, c2), Math.min(c3, c4)),
-                                   Math.max(Math.max(c1, c2), Math.max(c3, c4))};
+                        Math.max(Math.max(c1, c2), Math.max(c3, c4))};
             }
             case DIV -> {
-                if (b0 <= 0.0 && b1 >= 0.0) yield new double[]{Double.NEGATIVE_INFINITY, Double.POSITIVE_INFINITY};
+                if (b0 <= 0.0 && b1 >= 0.0) {
+                    yield new double[]{Double.NEGATIVE_INFINITY, Double.POSITIVE_INFINITY};
+                }
                 double c1 = a0 / b0, c2 = a0 / b1, c3 = a1 / b0, c4 = a1 / b1;
                 yield new double[]{Math.min(Math.min(c1, c2), Math.min(c3, c4)),
-                                   Math.max(Math.max(c1, c2), Math.max(c3, c4))};
+                        Math.max(Math.max(c1, c2), Math.max(c3, c4))};
             }
             case MIN -> new double[]{Math.min(a0, b0), Math.min(a1, b1)};
             case MAX -> new double[]{Math.max(a0, b0), Math.max(a1, b1)};
         };
     }
 
-    private static double[] unaryInterval(IRNode.Unary u, ConstantPool pool) {
-        double[] a = interval(u.input(), pool);
+    private static double[] unaryInterval(IRNode.Unary u, ConstantPool pool, IdentityHashMap<IRNode, double[]> memo) {
+        double[] a = intervalImpl(u.input(), pool, memo);
         return switch (u.op()) {
             // ABS / SQUARE intentionally use vanilla DensityFunctions.Mapped.create's
             // loose bounds — `[max(0, input.min), max(transform(input.min), transform(

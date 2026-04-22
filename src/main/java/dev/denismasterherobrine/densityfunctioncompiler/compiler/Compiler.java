@@ -10,6 +10,7 @@ import dev.denismasterherobrine.densityfunctioncompiler.compiler.ir.Bounds;
 import dev.denismasterherobrine.densityfunctioncompiler.compiler.ir.IRBuilder;
 import dev.denismasterherobrine.densityfunctioncompiler.compiler.ir.IRNode;
 import dev.denismasterherobrine.densityfunctioncompiler.compiler.ir.IROptimizer;
+import dev.denismasterherobrine.densityfunctioncompiler.compiler.ir.NoiseExpander;
 import dev.denismasterherobrine.densityfunctioncompiler.compiler.ir.RefCount;
 import dev.denismasterherobrine.densityfunctioncompiler.compiler.pipeline.CompilingVisitor;
 import dev.denismasterherobrine.densityfunctioncompiler.compiler.pipeline.RouterPipeline;
@@ -65,6 +66,23 @@ public final class Compiler {
             root = optResult.root();
             int optimizerRewrites = optResult.rewrites();
 
+            // Tier 3 — noise inlining pass. Rewrites every Noise / ShiftedNoise /
+            // ShiftA / ShiftB / Shift / WeirdScaled into InlinedNoise / WeirdRarity
+            // form so the codegen can unroll their per-octave loops with baked-in
+            // amplitudes / input factors (see NoiseExpander javadoc). The expander
+            // exposes coordinate sub-trees as first-class IR, so we re-run the
+            // optimizer to fold the newly visible (x*scale + shift)*INPUT_FACTOR
+            // chains and to CSE shared coordinates.
+            NoiseExpander.Result noiseResult = NoiseExpander.expand(root, builder, pool);
+            root = noiseResult.root();
+            int noisesSpecialized = noiseResult.noisesSpecialized();
+            int octavesUnrolled = noiseResult.octavesUnrolled();
+            if (noisesSpecialized > 0) {
+                IROptimizer.Result postNoise = IROptimizer.optimize(root, builder, pool);
+                root = postNoise.root();
+                optimizerRewrites += postNoise.rewrites();
+            }
+
             int uniqueNodes = builder.internedCount();
             int cseSavings = builder.cseSavings();
             RefCount.Result rc = RefCount.compute(root);
@@ -79,7 +97,7 @@ public final class Compiler {
                 maxVal = df.maxValue();
             }
 
-            Set<IRNode> extracted = Splitter.plan(root, rc);
+            Set<IRNode> extracted = Splitter.plan(root, rc, pool);
 
             // Use _ rather than $ in the per-class suffix: hidden class bytecode that
             // contains a `$` in its own name confuses NeoForge's ModuleClassLoader into
@@ -123,13 +141,18 @@ public final class Compiler {
             // access to the hidden class — every call afterwards is just an invokeExact.
             MethodHandle ctorMH;
             try {
+                // Constructor parameter order matches CompiledDensityFunction's superclass
+                // ctor exactly. The second Object[] (after splines) carries the per-octave
+                // ImprovedNoise payload — see ConstantPool.finishNoiseOctaves.
                 MethodType ctorType = MethodType.methodType(void.class,
-                        double[].class, NormalNoise[].class, Object[].class, DensityFunction[].class,
+                        double[].class, NormalNoise[].class, Object[].class, Object[].class,
+                        DensityFunction[].class,
                         double.class, double.class,
                         MethodHandle[].class, MethodHandle.class);
                 ctorMH = lookup.findConstructor(cls, ctorType)
                         .asType(MethodType.methodType(CompiledDensityFunction.class,
-                                double[].class, NormalNoise[].class, Object[].class, DensityFunction[].class,
+                                double[].class, NormalNoise[].class, Object[].class, Object[].class,
+                                DensityFunction[].class,
                                 double.class, double.class,
                                 MethodHandle[].class, MethodHandle.class));
             } catch (NoSuchMethodException | IllegalAccessException e) {
@@ -143,6 +166,7 @@ public final class Compiler {
                         pool.finishConstants(),
                         pool.finishNoises(),
                         pool.finishSplines(),
+                        pool.finishNoiseOctaves(),
                         pool.finishExterns(),
                         minVal, maxVal,
                         helperHandles, ctorMH);
@@ -153,9 +177,11 @@ public final class Compiler {
             RouterPipeline.recordCompiledRoot(uniqueNodes, cseSavings);
             RouterPipeline.recordHelpers(helpersEmitted);
             RouterPipeline.recordOptimizerRewrites(optimizerRewrites);
+            RouterPipeline.recordNoiseInline(noisesSpecialized, octavesUnrolled);
 
             return new Result(compiled, root, rc, pool, bytecode, className,
                     uniqueNodes, cseSavings, helpersEmitted, optimizerRewrites,
+                    noisesSpecialized, octavesUnrolled,
                     minVal, maxVal);
         } catch (Throwable t) {
             DensityFunctionCompiler.LOGGER.warn(
@@ -179,6 +205,8 @@ public final class Compiler {
             int cseSavings,
             int helpersEmitted,
             int optimizerRewrites,
+            int noisesSpecialized,
+            int octavesUnrolled,
             double minValue,
             double maxValue) {}
 }
