@@ -1,11 +1,13 @@
 package dev.denismasterherobrine.densityfunctioncompiler.compiler.ir;
 
+import dev.denismasterherobrine.densityfunctioncompiler.compiler.McDensityFunctionClassNames;
 import dev.denismasterherobrine.densityfunctioncompiler.compiler.codegen.ConstantPool;
 import dev.denismasterherobrine.densityfunctioncompiler.compiler.pipeline.CompilingVisitor;
 import dev.denismasterherobrine.densityfunctioncompiler.compiler.spline.SplineInliner;
 import net.minecraft.util.CubicSpline;
 import net.minecraft.world.level.levelgen.DensityFunction;
 import net.minecraft.world.level.levelgen.DensityFunctions;
+import net.minecraft.world.level.levelgen.synth.BlendedNoise;
 
 import java.util.HashMap;
 import java.util.Map;
@@ -237,9 +239,18 @@ public final class IRBuilder {
             return new SplineInliner(this).inline(splineDf.spline());
         }
 
-        // EndIslands and BlendAlpha/BlendOffset/Beardifier are simple but special — go
-        // through Invoke for now (they're not on the hot path frequency-wise; correctness
-        // first).
+        if (df instanceof BlendedNoise) {
+            // Registry "old_blended_noise" type — not a DensityFunctions record; still evaluated via INVOKEINTERFACE.
+            int idx = pool.internExtern(df);
+            return intern(new IRNode.Invoke(idx));
+        }
+
+        if (McDensityFunctionClassNames.DENSITY_FUNCTIONS_END_ISLAND.equals(df.getClass().getName())) {
+            int idx = pool.internExtern(df);
+            return intern(new IRNode.EndIslands(idx));
+        }
+
+        // BlendAlpha/BlendOffset/Beardifier, unknown mod / datapack DFs, etc.
         int idx = pool.internExtern(df);
         return intern(new IRNode.Invoke(idx));
     }

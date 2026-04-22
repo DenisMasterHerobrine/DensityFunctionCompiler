@@ -165,6 +165,13 @@ public final class ParitySelfTest {
         out.add(new Case("min_xx(yc.abs())", DensityFunctions.min(sharedAbs, sharedAbs)));
         out.add(new Case("max_xx(yc.abs())", DensityFunctions.max(sharedAbs, sharedAbs)));
 
+        // Ap2: TwoArgumentSimpleFunction (non-const, non-const) — not MulOrAdd-fused.
+        DensityFunction y1 = DensityFunctions.yClampedGradient(-64, 64, 0.0, 1.0);
+        DensityFunction y2 = DensityFunctions.yClampedGradient(0, 320, 0.0, 2.0);
+        out.add(new Case("ap2_tasf_min(yc1, yc2)", DensityFunctions.min(y1, y2)));
+        out.add(new Case("ap2_tasf_max(yc1, yc2)", DensityFunctions.max(y1, y2)));
+        out.add(new Case("ap2_tasf_mul(yc1, yc2)", DensityFunctions.mul(y1, y2)));
+
         return out;
     }
 
@@ -245,5 +252,25 @@ public final class ParitySelfTest {
             DensityFunctionCompiler.LOGGER.warn("  noise fail: {}", f);
         }
         return new SuiteResult(total, passed, failures);
+    }
+
+    /**
+     * See {@link VanillaDensityFunctionCoverage#runFactoryBattery()}.
+     */
+    public static VanillaDensityFunctionCoverage.BatteryResult runVanillaFactoryCoverage() {
+        return VanillaDensityFunctionCoverage.runFactoryBattery();
+    }
+
+    /**
+     * See {@link VanillaDensityFunctionCoverage#runRegistryReferenceAudit} — every
+     * built-in+datapack {@link net.minecraft.core.registries.Registries#DENSITY_FUNCTION} value.
+     */
+    public static VanillaDensityFunctionCoverage.BatteryResult runRegistryInvokeCoverage(
+            net.minecraft.commands.CommandSourceStack src) {
+        if (src.getServer() == null) {
+            return new VanillaDensityFunctionCoverage.BatteryResult(0, 0, List.of("no server for registry"));
+        }
+        return VanillaDensityFunctionCoverage.runRegistryReferenceAudit(
+                src.getServer().registryAccess().registryOrThrow(Registries.DENSITY_FUNCTION));
     }
 }

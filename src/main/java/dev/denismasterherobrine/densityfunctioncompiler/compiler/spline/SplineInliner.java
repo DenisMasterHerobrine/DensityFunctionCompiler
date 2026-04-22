@@ -19,6 +19,11 @@ import java.util.List;
  * <p>{@code Multipoint} splines are kept as {@link IRNode.Spline.Multipoint} for the
  * codegen to lower into an inline binary-search ladder; we don't flatten further here
  * because the codegen needs the structured form anyway.
+ *
+ * <p><b>Vanilla coverage</b>: in Minecraft 1.21.x, {@link CubicSpline} has only two
+ * implementations — {@link CubicSpline.Constant} and {@link CubicSpline.Multipoint}.
+ * Worldgen JSON therefore cannot produce any other shape; the fallback branch below
+ * is defensive.
  */
 public final class SplineInliner {
 

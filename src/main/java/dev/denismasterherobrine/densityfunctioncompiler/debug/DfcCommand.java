@@ -5,6 +5,7 @@ import com.mojang.brigadier.arguments.StringArgumentType;
 import com.mojang.brigadier.builder.LiteralArgumentBuilder;
 import dev.denismasterherobrine.densityfunctioncompiler.compiler.pipeline.RouterPipeline;
 import dev.denismasterherobrine.densityfunctioncompiler.test.ParitySelfTest;
+import dev.denismasterherobrine.densityfunctioncompiler.test.VanillaDensityFunctionCoverage;
 import net.minecraft.ChatFormatting;
 import net.minecraft.commands.CommandSourceStack;
 import net.minecraft.commands.Commands;
@@ -79,7 +80,25 @@ public final class DfcCommand {
                     for (String f : noise.failures()) {
                         src.sendSuccess(() -> Component.literal("  noise fail: " + f).withStyle(ChatFormatting.RED), false);
                     }
-                    return arith.failures().isEmpty() && noise.failures().isEmpty() ? 1 : 0;
+                    var facCov = VanillaDensityFunctionCoverage.runFactoryBattery();
+                    var fc = facCov.failures().isEmpty() ? ChatFormatting.GREEN : ChatFormatting.RED;
+                    src.sendSuccess(() -> Component.literal(
+                            "DFC factory IR invoke audit: %d/%d".formatted(facCov.passed(), facCov.casesRun()))
+                            .withStyle(fc), false);
+                    for (String f : facCov.failures()) {
+                        src.sendSuccess(() -> Component.literal("  coverage fail: " + f).withStyle(ChatFormatting.RED), false);
+                    }
+                    var regCov = ParitySelfTest.runRegistryInvokeCoverage(ctx.getSource());
+                    var rc = regCov.failures().isEmpty() ? ChatFormatting.GREEN : ChatFormatting.RED;
+                    src.sendSuccess(() -> Component.literal(
+                            "DFC registry IR invoke audit: %d/%d".formatted(regCov.passed(), regCov.casesRun()))
+                            .withStyle(rc), false);
+                    for (String f : regCov.failures()) {
+                        src.sendSuccess(() -> Component.literal("  registry fail: " + f).withStyle(ChatFormatting.RED), false);
+                    }
+                    boolean allOk = arith.failures().isEmpty() && noise.failures().isEmpty()
+                            && facCov.failures().isEmpty() && regCov.failures().isEmpty();
+                    return allOk ? 1 : 0;
                 }))
                 .then(Commands.literal("parity")
                         .executes(ctx -> RouterParityCommand.runAll(ctx.getSource(), 1024))
