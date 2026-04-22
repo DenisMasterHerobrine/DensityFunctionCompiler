@@ -2,9 +2,14 @@ package dev.denismasterherobrine.densityfunctioncompiler.compiler.codegen;
 
 import net.minecraft.util.KeyDispatchDataCodec;
 import net.minecraft.world.level.levelgen.DensityFunction;
+import net.minecraft.world.level.levelgen.DensityFunctions;
 import net.minecraft.world.level.levelgen.synth.NormalNoise;
 
+import java.lang.invoke.CallSite;
+import java.lang.invoke.ConstantCallSite;
 import java.lang.invoke.MethodHandle;
+import java.lang.invoke.MethodHandles;
+import java.lang.invoke.MethodType;
 
 /**
  * Abstract base for every runtime-compiled DensityFunction.
@@ -208,32 +213,97 @@ public abstract class CompiledDensityFunction implements DensityFunction {
         }
     }
 
+    /**
+     * Visitor-driven extern remap, the worldgen-hot variant. The vanilla shape
+     * — clone the externs array, walk each child, rebind on any change, then
+     * forward to {@code visitor.apply} — is what {@code NoiseChunk} relies on
+     * to install cell caches before chunk evaluation. We preserve those semantics
+     * but make three changes that recover most of the {@code mapAll} time the
+     * profiler showed in {@code init_biomes} and the chunk-init prelude:
+     *
+     * <ol>
+     *   <li><b>Within-call memoization.</b> A {@link MapAllSession} wrapper is
+     *       installed on the user visitor on the outermost call. Re-entrant calls
+     *       (a sibling parent compiled DF reaching us through its own externs
+     *       walk) detect the wrapper via {@code instanceof}, hit the per-session
+     *       memo and return the same rebound instance — which is precisely what
+     *       {@code NoiseChunk}'s record-equality dedup of {@code wrapped()}
+     *       requires to collapse all duplicate {@code FlatCache}/{@code NoiseInterpolator}
+     *       allocations into one.</li>
+     *   <li><b>Marker-extern reuse.</b> Vanilla {@link DensityFunctions.MarkerOrMarked#mapAll}
+     *       always allocates {@code new Marker(type, wrapped.mapAll(visitor))},
+     *       even when the inner result is reference-identical. We bypass that by
+     *       handling marker externs directly in {@link #mapExtern}: when
+     *       {@code inner.mapAll} returns the same instance, we forward the
+     *       <em>original</em> marker to {@code visitor.apply}, not a freshly
+     *       allocated one. Same identity → {@code wrap}'s {@code computeIfAbsent}
+     *       hits a single cache wrapper.</li>
+     *   <li><b>Lazy externs clone.</b> We only allocate a new
+     *       {@code DensityFunction[]} when at least one extern actually changed,
+     *       skipping the per-call array allocation that the previous unconditional
+     *       {@code new DensityFunction[length]} produced.</li>
+     * </ol>
+     *
+     * <p>The noise array is not currently rebuilt through {@link DensityFunction.Visitor#visitNoise}
+     * — {@code CompilingVisitor} passes through {@code visitNoise} unchanged and
+     * noise samplers are captured by identity at compile time. Mods that override
+     * {@code visitNoise} should remap at the source DensityFunction layer, before
+     * the compiler captures references.
+     */
     @Override
     public DensityFunction mapAll(DensityFunction.Visitor visitor) {
-        // Allow other mods' visitors to intercept this whole compiled function first
-        // (matches Marker / TwoArgumentSimpleFunction.mapAll semantics).
-        boolean changed = false;
+        MapAllSession session = (visitor instanceof MapAllSession s)
+                ? s
+                : new MapAllSession(visitor);
 
-        DensityFunction[] mappedExterns = this.externs;
-        if (this.externs.length > 0) {
-            mappedExterns = new DensityFunction[this.externs.length];
-            for (int i = 0; i < this.externs.length; i++) {
-                DensityFunction mapped = this.externs[i].mapAll(visitor);
-                mappedExterns[i] = mapped;
-                if (mapped != this.externs[i]) {
-                    changed = true;
+        DensityFunction cached = session.compiledMemo.get(this);
+        if (cached != null) {
+            return cached;
+        }
+
+        DensityFunction result = doMapAll(session);
+        session.compiledMemo.put(this, result);
+        return result;
+    }
+
+    private DensityFunction doMapAll(MapAllSession session) {
+        final DensityFunction[] externs = this.externs;
+        DensityFunction[] mappedExterns = null; // lazy clone — only allocated on first change
+
+        for (int i = 0; i < externs.length; i++) {
+            DensityFunction src = externs[i];
+            DensityFunction out = mapExtern(src, session);
+            if (out != src) {
+                if (mappedExterns == null) {
+                    mappedExterns = externs.clone();
                 }
+                mappedExterns[i] = out;
             }
         }
 
-        NormalNoise[] mappedNoises = this.noises;
-        // We don't currently rebuild NoiseHolder objects through the visitor here; the
-        // CompilingVisitor passes through visitNoise unchanged and noise instances are
-        // captured by identity. Mods overriding visitNoise should remap at the source
-        // DensityFunction layer, before our compiler captures references.
+        DensityFunction rebound = (mappedExterns != null)
+                ? this.rebind(this.noises, mappedExterns)
+                : this;
+        return session.apply(rebound);
+    }
 
-        DensityFunction rebound = changed ? this.rebind(mappedNoises, mappedExterns) : this;
-        return visitor.apply(rebound);
+    /**
+     * Apply {@code session} (which forwards to the user visitor) to a single extern.
+     * Vanilla {@code MarkerOrMarked.mapAll} is bypassed for marker externs to avoid
+     * its unconditional {@code new Marker(type, ...)} allocation when the inner
+     * subtree didn't change — preserving original-marker identity is what lets
+     * {@code NoiseChunk::wrap}'s identity/equality-keyed dedup fire.
+     */
+    private static DensityFunction mapExtern(DensityFunction src, MapAllSession session) {
+        if (src instanceof DensityFunctions.MarkerOrMarked marker) {
+            DensityFunction inner = marker.wrapped();
+            DensityFunction newInner = inner.mapAll(session);
+            DensityFunction effective = (newInner == inner)
+                    ? src
+                    : new DensityFunctions.Marker(marker.type(), newInner);
+            return session.apply(effective);
+        }
+        return src.mapAll(session);
     }
 
     @Override
@@ -243,5 +313,66 @@ public abstract class CompiledDensityFunction implements DensityFunction {
         // us through codecs, fail loudly rather than corrupting data.
         throw new UnsupportedOperationException(
                 "CompiledDensityFunction is not serialisable (instance class: " + this.getClass().getName() + ")");
+    }
+
+    /**
+     * Bootstrap method for every {@code INVOKEDYNAMIC} site that dispatches to a
+     * private static helper on the hidden class itself. Returns a
+     * {@link ConstantCallSite} permanently bound to the helper named
+     * {@code invokedName} with type {@code invokedType}.
+     *
+     * <h2>Why indy here</h2>
+     *
+     * <p>The legacy emission sequence
+     * {@code ALOAD 0 / GETFIELD helperHandles / LDC idx / AALOAD / ALOAD 0 / ALOAD 1 /
+     * INVOKEVIRTUAL MethodHandle.invokeExact} is correct but the JIT only ever sees
+     * the {@code MethodHandle} as a polymorphic callee through a field load and an
+     * array index — it can't constant-fold across the indirection unless C2 also
+     * pulls the full object hierarchy into its inlining graph. With
+     * {@code INVOKEDYNAMIC + ConstantCallSite}, the call site is treated by C2 as
+     * a constant-target invocation: the indirection collapses, the helper body
+     * inlines into the parent method, and the per-call cost drops to roughly the
+     * cost of a direct static call (no array load, no field load, no virtual
+     * dispatch through {@code invokeExact}).
+     *
+     * <h2>Why this lookup works for hidden classes</h2>
+     *
+     * <p>The {@code Lookup} the JVM hands to a bsm has the access privileges of
+     * the class that declared the indy site. For our hidden classes that lookup
+     * carries {@code MODULE | PRIVATE} access, including the right to find
+     * private static methods on itself. We deliberately call
+     * {@code lookup.findStatic(lookup.lookupClass(), invokedName, type)} so the
+     * resolution does <em>not</em> have to traverse an external class loader —
+     * critical for hidden classes (which aren't reachable through any class
+     * loader's name table).
+     *
+     * <h2>Used by</h2>
+     *
+     * <ul>
+     *   <li>{@link Codegen} for the {@code helper_<idx>} dispatch sites, with
+     *       {@code invokedName = "helper_5"} etc. and
+     *       {@code invokedType = (LCompiledDensityFunction;LFunctionContext;)D}.</li>
+     *   <li>The cell-lattice {@code lattice_y} / {@code lattice_inner} helpers
+     *       emitted by Phase 2's {@code fillArray} override. Those helpers use
+     *       a different {@code invokedType} (the {@code lattice_inner} variant
+     *       takes an extra {@code double} for the precomputed Y-slab value), so
+     *       sharing one bsm keeps the call-site emission uniform.</li>
+     * </ul>
+     *
+     * <h2>Fallback path</h2>
+     *
+     * <p>The legacy {@code helperHandles[]} array is still populated by the
+     * {@code Compiler} and still emitted by {@link Codegen} when the system
+     * property {@code -Ddfc.indy_helpers=false} is set. That gives us a clean
+     * rollback if a JVM update produces a {@link LinkageError} on indy
+     * bootstrap (extremely unlikely on Java 21+, but cheap insurance).
+     */
+    public static CallSite bootstrapHelper(MethodHandles.Lookup lookup,
+                                           String invokedName,
+                                           MethodType invokedType)
+            throws ReflectiveOperationException {
+        Class<?> owner = lookup.lookupClass();
+        MethodHandle mh = lookup.findStatic(owner, invokedName, invokedType);
+        return new ConstantCallSite(mh);
     }
 }

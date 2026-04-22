@@ -34,12 +34,14 @@ public final class DfcDumper {
                 ("DFC dump: %d compiled roots, %d unique IR nodes, %d hidden classes alive, "
                         + "%d node references collapsed by CSE, %d helper methods emitted, "
                         + "%d optimizer rewrite passes, %d noises inlined (%d octaves unrolled), "
-                        + "%d blended roots (%d blended octaves in bytecode)")
+                        + "%d blended roots (%d blended octaves in bytecode), "
+                        + "global class cache: %d hits, %d codegen misses")
                         .formatted(stats.rootsCompiled(), stats.uniqueNodes(),
                                 stats.classesAlive(), stats.savedByCse(),
                                 stats.helpersEmitted(), stats.optimizerRewrites(),
                                 stats.noisesInlined(), stats.octavesInlined(),
-                                stats.blendedInlined(), stats.blendedOctavesEmitted())), false);
+                                stats.blendedInlined(), stats.blendedOctavesEmitted(),
+                                stats.globalClassCacheHits(), stats.globalCodegenCacheMisses())), false);
     }
 
     /**

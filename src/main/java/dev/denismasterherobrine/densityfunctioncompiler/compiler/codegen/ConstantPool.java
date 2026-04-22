@@ -239,4 +239,7 @@ public final class ConstantPool {
     public DensityFunction extern(int idx) { return externs.get(idx); }
     public NormalNoise noise(int idx)      { return noises.get(idx); }
     public double constant(int idx)        { return constants.get(idx); }
+
+    /** Spline object interned at {@code idx} — for fingerprinting / diagnostics. */
+    public Object splineObject(int idx)    { return splines.get(idx); }
 }

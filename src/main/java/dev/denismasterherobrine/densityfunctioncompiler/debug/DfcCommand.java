@@ -3,9 +3,15 @@ package dev.denismasterherobrine.densityfunctioncompiler.debug;
 import com.mojang.brigadier.CommandDispatcher;
 import com.mojang.brigadier.arguments.StringArgumentType;
 import com.mojang.brigadier.builder.LiteralArgumentBuilder;
+import dev.denismasterherobrine.densityfunctioncompiler.DensityFunctionCompiler;
 import dev.denismasterherobrine.densityfunctioncompiler.compiler.pipeline.RouterPipeline;
+import dev.denismasterherobrine.densityfunctioncompiler.test.CoordDepTest;
+import dev.denismasterherobrine.densityfunctioncompiler.test.GlobalClassCacheTest;
+import dev.denismasterherobrine.densityfunctioncompiler.test.LatticePlanTest;
+import dev.denismasterherobrine.densityfunctioncompiler.test.MapAllSessionTest;
 import dev.denismasterherobrine.densityfunctioncompiler.test.ParitySelfTest;
 import dev.denismasterherobrine.densityfunctioncompiler.test.VanillaDensityFunctionCoverage;
+import dev.denismasterherobrine.densityfunctioncompiler.test.VectorParityTest;
 import net.minecraft.ChatFormatting;
 import net.minecraft.commands.CommandSourceStack;
 import net.minecraft.commands.Commands;
@@ -16,7 +22,8 @@ import net.minecraft.resources.ResourceLocation;
 /**
  * {@code /dfc} debug commands. Three subcommands:
  * <ul>
- *   <li>{@code /dfc stats} — aggregate compilation counters.</li>
+ *   <li>{@code /dfc stats} — aggregate compilation counters (incl. global class cache).</li>
+ *   <li>{@code /dfc cachetest} — Tier 4/5 sanity (class cache + {@code CoordDep}).</li>
  *   <li>{@code /dfc dump} — short summary written to chat.</li>
  *   <li>{@code /dfc dump &lt;noise_settings&gt; &lt;field&gt;} — IR / bytecode / parity
  *       sample for one router slot, written to the server log.</li>
@@ -25,22 +32,83 @@ import net.minecraft.resources.ResourceLocation;
 public final class DfcCommand {
     private DfcCommand() {}
 
+    /**
+     * Render a byte count in the smallest human unit that keeps the magnitude
+     * under three digits — {@code 412 B} / {@code 38.4 KiB} / {@code 1.4 MiB}.
+     * Used for the class-cache "bytes saved" display on {@code /dfc stats}.
+     */
+    private static String humanBytes(long bytes) {
+        if (bytes < 1024) return bytes + " B";
+        double k = bytes / 1024.0;
+        if (k < 1024) return String.format("%.1f KiB", k);
+        double m = k / 1024.0;
+        if (m < 1024) return String.format("%.1f MiB", m);
+        return String.format("%.1f GiB", m / 1024.0);
+    }
+
     public static void register(CommandDispatcher<CommandSourceStack> dispatcher) {
         LiteralArgumentBuilder<CommandSourceStack> root = Commands.literal("dfc")
                 .requires(src -> src.hasPermission(2))
                 .then(Commands.literal("stats").executes(ctx -> {
                     var stats = RouterPipeline.snapshotStats();
-                    ctx.getSource().sendSuccess(() -> Component.literal(
+                    double noiseRate = RouterPipeline.noiseInlineRate();
+                    double blendedRate = RouterPipeline.blendedInlineRate();
+                    var src = ctx.getSource();
+                    src.sendSuccess(() -> Component.literal(
                             ("DFC: %d roots compiled, %d unique IR nodes, %d hidden classes alive, "
                                     + "%d helpers emitted, %d optimizer rewrite passes, "
                                     + "%d noises inlined (%d octaves unrolled), "
-                                    + "%d blended roots (%d blended octaves in bytecode)")
+                                    + "%d blended roots (%d blended octaves in bytecode), "
+                                    + "global class cache: %d hits, %d codegen misses")
                                     .formatted(stats.rootsCompiled(), stats.uniqueNodes(),
                                             stats.classesAlive(), stats.helpersEmitted(),
                                             stats.optimizerRewrites(),
                                             stats.noisesInlined(), stats.octavesInlined(),
-                                            stats.blendedInlined(), stats.blendedOctavesEmitted())),
+                                            stats.blendedInlined(), stats.blendedOctavesEmitted(),
+                                            stats.globalClassCacheHits(), stats.globalCodegenCacheMisses())),
                             false);
+                    src.sendSuccess(() -> Component.literal(
+                            ("DFC inline: noise %.1f%% (%d failures), blended %.1f%% (%d failures), "
+                                    + "%d octaves skipped; class cache saved ~%s bytecode "
+                                    + "across %d shared instances")
+                                    .formatted(noiseRate * 100.0, stats.noiseMixinFailures(),
+                                            blendedRate * 100.0, stats.blendedMixinFailures(),
+                                            stats.octavesSkipped(),
+                                            humanBytes(stats.globalClassCacheBytesSaved()),
+                                            stats.globalClassCacheInstancesShared())),
+                            false);
+                    long totalLatticeRoots = stats.latticePlansEmitted() + stats.latticeFallbacks();
+                    double latticeRate = totalLatticeRoots == 0 ? 0.0
+                            : (stats.latticePlansEmitted() * 100.0) / totalLatticeRoots;
+                    boolean vectorOn = dev.denismasterherobrine.densityfunctioncompiler
+                            .compiler.vector.DfcVectorSupport.AVAILABLE;
+                    int vectorLanes = dev.denismasterherobrine.densityfunctioncompiler
+                            .compiler.vector.DfcVectorSupport.PREFERRED_LANES;
+                    src.sendSuccess(() -> Component.literal(
+                            ("DFC fast paths: cell-lattice %d / %d roots (%.1f%%), "
+                                    + "vector API %s%s")
+                                    .formatted(stats.latticePlansEmitted(), totalLatticeRoots,
+                                            latticeRate,
+                                            vectorOn ? "enabled" : "disabled",
+                                            vectorOn ? " (preferred " + vectorLanes + " lanes)" : "")),
+                            false);
+                    return 1;
+                }))
+                .then(Commands.literal("cachetest").executes(ctx -> {
+                    try {
+                        GlobalClassCacheTest.verify();
+                        CoordDepTest.verify();
+                        MapAllSessionTest.verify();
+                        LatticePlanTest.verify();
+                        VectorParityTest.verify();
+                        ctx.getSource().sendSuccess(
+                                () -> Component.literal("DFC: global class cache + CoordDep + MapAllSession "
+                                        + "+ LatticePlan + VectorParity: OK"), false);
+                    } catch (Throwable t) {
+                        DensityFunctionCompiler.LOGGER.error("DFC cachetest failed", t);
+                        ctx.getSource().sendFailure(Component.literal("cachetest: " + t.getMessage()));
+                        return 0;
+                    }
                     return 1;
                 }))
                 .then(Commands.literal("dump")

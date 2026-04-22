@@ -1,6 +1,9 @@
 package dev.denismasterherobrine.densityfunctioncompiler.compiler.pipeline;
 
 import dev.denismasterherobrine.densityfunctioncompiler.DensityFunctionCompiler;
+import dev.denismasterherobrine.densityfunctioncompiler.compiler.cache.GlobalCompileCache;
+import dev.denismasterherobrine.densityfunctioncompiler.compiler.noise.BlendedNoiseSpecCache;
+import dev.denismasterherobrine.densityfunctioncompiler.compiler.noise.NoiseSpecCache;
 import net.minecraft.world.level.biome.Climate;
 import net.minecraft.world.level.levelgen.DensityFunction;
 import net.minecraft.world.level.levelgen.NoiseRouter;
@@ -43,6 +46,27 @@ public final class RouterPipeline {
      *  contributes 1, even though both bump {@link #NOISES_INLINED_TOTAL} the
      *  same amount. */
     private static final AtomicLong OCTAVES_INLINED_TOTAL = new AtomicLong();
+    private static final AtomicLong GLOBAL_CLASS_CACHE_HITS = new AtomicLong();
+    private static final AtomicLong GLOBAL_CODEGEN_MISSES = new AtomicLong();
+
+    /**
+     * Number of compiled roots (cache miss <em>or</em> cache hit) whose class
+     * carries a {@link dev.denismasterherobrine.densityfunctioncompiler.compiler.ir.CellLatticeOption}
+     * fast-path ({@code lattice_y} + {@code lattice_inner} + {@code fillArray}
+     * override). Counted per-root so {@code rootsCompiled - latticePlansEmitted}
+     * is the number of routers that fell back to the scalar
+     * {@link dev.denismasterherobrine.densityfunctioncompiler.compiler.codegen.CompiledDensityFunction#fillArray}
+     * path either because the analysis found nothing worth hoisting or because
+     * the planner is gated off by {@code -Ddfc.cell_lattice=false}.
+     */
+    private static final AtomicLong LATTICE_PLANS_EMITTED = new AtomicLong();
+    /**
+     * Roots where the lattice planner ran and returned no plan (or was disabled).
+     * Surfaces "the scalar fallback fired" without confusing it with "compilation
+     * failed entirely" (the latter falls back to the original DensityFunction and
+     * never hits this counter).
+     */
+    private static final AtomicLong LATTICE_FALLBACKS = new AtomicLong();
 
     /**
      * Compiles each router / sampler top-level field in parallel. A task running in
@@ -211,6 +235,21 @@ public final class RouterPipeline {
         CSE_SAVINGS_TOTAL.addAndGet(csePostInternSavings);
     }
 
+    /**
+     * A full IR build and pool ran, but a hidden class for this fingerprint
+     * already existed; no new class was added to the JVM.
+     */
+    public static void recordRootFromGlobalClassCache(int uniqueNodes, int csePostInternSavings) {
+        GLOBAL_CLASS_CACHE_HITS.incrementAndGet();
+        ROOTS_COMPILED.incrementAndGet();
+        UNIQUE_NODES_TOTAL.addAndGet(uniqueNodes);
+        CSE_SAVINGS_TOTAL.addAndGet(csePostInternSavings);
+    }
+
+    public static void recordGlobalCacheCodegenMiss() {
+        GLOBAL_CODEGEN_MISSES.incrementAndGet();
+    }
+
     public static void recordHelpers(int helpersEmitted) {
         if (helpersEmitted > 0) HELPERS_TOTAL.addAndGet(helpersEmitted);
     }
@@ -235,6 +274,20 @@ public final class RouterPipeline {
         if (blendedNonNullOctaves > 0) BLENDED_OCTAVES_EMITTED_TOTAL.addAndGet(blendedNonNullOctaves);
     }
 
+    /**
+     * One per compiled root: bumps {@link #LATTICE_PLANS_EMITTED} when the
+     * codegen produced a lattice fast path, otherwise bumps
+     * {@link #LATTICE_FALLBACKS}. Called from {@link
+     * dev.denismasterherobrine.densityfunctioncompiler.compiler.Compiler}
+     * regardless of whether this is a cache hit or miss — the lattice plan is
+     * baked into the cached bundle, so the same hidden class always behaves
+     * the same way.
+     */
+    public static void recordLatticePlan(boolean emitted) {
+        if (emitted) LATTICE_PLANS_EMITTED.incrementAndGet();
+        else LATTICE_FALLBACKS.incrementAndGet();
+    }
+
     public static void recordCompiledClassDropped() {
         CLASSES_ALIVE.decrementAndGet();
     }
@@ -242,7 +295,44 @@ public final class RouterPipeline {
     public record Stats(int rootsCompiled, int classesAlive, long uniqueNodes,
                          long savedByCse, long helpersEmitted, long optimizerRewrites,
                          long noisesInlined, long octavesInlined,
-                         long blendedInlined, long blendedOctavesEmitted) {}
+                         long blendedInlined, long blendedOctavesEmitted,
+                         long globalClassCacheHits, long globalCodegenCacheMisses,
+                         /**
+                          * NormalNoise instances DFC tried to inline but bailed because the
+                          * NormalNoiseAccessor / PerlinNoiseAccessor mixin was not bound.
+                          * A non-zero value here points at a broken vanilla refactor or a
+                          * coremod stripping our class transformations — DFC stays correct
+                          * (it falls back to legacy {@code INVOKEVIRTUAL NormalNoise.getValue})
+                          * but loses the inline win for those samplers. Compare against
+                          * {@link #noisesInlined} for the inline-rate ratio.
+                          */
+                         long noiseMixinFailures,
+                         /** {@code BlendedNoise} instances we couldn't inline for the same reason. */
+                         long blendedMixinFailures,
+                         /**
+                          * Sum of octaves we silently skipped during noise-spec build (null
+                          * {@code ImprovedNoise} array slots, zero-amplitude entries). High
+                          * counts here are normal — many vanilla noises have ~half their octave
+                          * slots intentionally null — but the number is exposed so a sudden jump
+                          * after a Mojang refactor surfaces immediately.
+                          */
+                         long octavesSkipped,
+                         /** Total bytes we estimate the global class cache saved by reusing a
+                          *  fingerprinted hidden class instead of regenerating its bytecode.
+                          *  Surfaced in {@code /dfc stats}. */
+                         long globalClassCacheBytesSaved,
+                         /** Number of {@link dev.denismasterherobrine.densityfunctioncompiler.compiler.codegen.CompiledDensityFunction}
+                          *  instances backed by a shared, cached hidden class (vs. its own
+                          *  freshly emitted one). */
+                         long globalClassCacheInstancesShared,
+                         /** Compiled roots whose codegen produced a {@link
+                          * dev.denismasterherobrine.densityfunctioncompiler.compiler.ir.CellLatticeOption}
+                          * fast path (lattice_y + lattice_inner + fillArray override). */
+                         long latticePlansEmitted,
+                         /** Compiled roots that fell back to the scalar fillArray
+                          * path because the planner found no axis-only hoist worth
+                          * promoting (or {@code -Ddfc.cell_lattice=false}). */
+                         long latticeFallbacks) {}
 
     public static Stats snapshotStats() {
         return new Stats(
@@ -255,6 +345,37 @@ public final class RouterPipeline {
                 NOISES_INLINED_TOTAL.get(),
                 OCTAVES_INLINED_TOTAL.get(),
                 BLENDED_NOISES_INLINED_TOTAL.get(),
-                BLENDED_OCTAVES_EMITTED_TOTAL.get());
+                BLENDED_OCTAVES_EMITTED_TOTAL.get(),
+                GLOBAL_CLASS_CACHE_HITS.get(),
+                GLOBAL_CODEGEN_MISSES.get(),
+                NoiseSpecCache.MIXIN_BIND_FAILURES.get(),
+                BlendedNoiseSpecCache.MIXIN_BIND_FAILURES.get(),
+                NoiseSpecCache.OCTAVES_SKIPPED.get(),
+                GlobalCompileCache.INSTANCE.bytesSaved(),
+                GlobalCompileCache.INSTANCE.instancesShared(),
+                LATTICE_PLANS_EMITTED.get(),
+                LATTICE_FALLBACKS.get());
+    }
+
+    /**
+     * Convenience: ratio of successful {@code NormalNoise} inlines to the total
+     * (inlines + bind failures). {@code 1.0} means every visited sampler made it
+     * into bytecode; values noticeably under {@code 1.0} indicate a binding regression
+     * worth investigating. Returns {@code 1.0} when no noises have been visited yet
+     * to avoid a misleading "0% inline rate" splash on a freshly booted server.
+     */
+    public static double noiseInlineRate() {
+        long inlined = NOISES_INLINED_TOTAL.get();
+        long failed = NoiseSpecCache.MIXIN_BIND_FAILURES.get();
+        long denom = inlined + failed;
+        return denom == 0 ? 1.0 : ((double) inlined) / ((double) denom);
+    }
+
+    /** Same as {@link #noiseInlineRate()} for {@code BlendedNoise}. */
+    public static double blendedInlineRate() {
+        long inlined = BLENDED_NOISES_INLINED_TOTAL.get();
+        long failed = BlendedNoiseSpecCache.MIXIN_BIND_FAILURES.get();
+        long denom = inlined + failed;
+        return denom == 0 ? 1.0 : ((double) inlined) / ((double) denom);
     }
 }

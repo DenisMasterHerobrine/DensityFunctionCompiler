@@ -1,9 +1,11 @@
 package dev.denismasterherobrine.densityfunctioncompiler.compiler.codegen;
 
 import dev.denismasterherobrine.densityfunctioncompiler.compiler.noise.BlendedNoiseSpec;
+import dev.denismasterherobrine.densityfunctioncompiler.compiler.ir.CellLatticeOption;
 import dev.denismasterherobrine.densityfunctioncompiler.compiler.ir.IRNode;
 import dev.denismasterherobrine.densityfunctioncompiler.compiler.ir.RefCount;
 import org.objectweb.asm.ClassWriter;
+import org.objectweb.asm.Handle;
 import org.objectweb.asm.Label;
 import org.objectweb.asm.MethodVisitor;
 import org.objectweb.asm.Opcodes;
@@ -87,6 +89,8 @@ public final class Codegen {
     private static final String DENSITY_FUNCTION_DESC = "L" + DENSITY_FUNCTION_INTERNAL + ";";
     private static final String FUNCTION_CONTEXT_INTERNAL =
             "net/minecraft/world/level/levelgen/DensityFunction$FunctionContext";
+    private static final String CONTEXT_PROVIDER_INTERNAL =
+            "net/minecraft/world/level/levelgen/DensityFunction$ContextProvider";
     private static final String METHOD_HANDLE_INTERNAL = "java/lang/invoke/MethodHandle";
     private static final String METHOD_HANDLE_ARRAY_DESC = "[Ljava/lang/invoke/MethodHandle;";
     private static final String OBJECT_ARRAY_DESC = "[Ljava/lang/Object;";
@@ -122,6 +126,70 @@ public final class Codegen {
      */
     public static final String HELPER_DESC =
             "(L" + COMPILED_BASE_INTERNAL + ";L" + FUNCTION_CONTEXT_INTERNAL + ";)D";
+
+    /**
+     * When {@code true} (default), helper call sites are emitted as
+     * {@code INVOKEDYNAMIC} bound to {@link CompiledDensityFunction#bootstrapHelper};
+     * when {@code false}, the legacy {@code helperHandles[idx].invokeExact} sequence
+     * is emitted instead. The fallback path stays in place for one release as
+     * insurance against unforeseen {@link LinkageError}s on hidden-class indy bsm
+     * resolution; opt-out with {@code -Ddfc.indy_helpers=false}.
+     */
+    public static final boolean INDY_HELPERS_ENABLED =
+            !"false".equalsIgnoreCase(System.getProperty("dfc.indy_helpers", "true"));
+
+    /**
+     * When {@code true} (default), {@link CellLatticeOption#analyze} runs and, if it
+     * finds a worthwhile axis-only hoist, the codegen emits the {@code lattice_y} /
+     * {@code lattice_inner} helpers plus a {@code fillArray} override that drives the
+     * NoiseChunk triple loop with the precomputed Y-slab cached once per Y position.
+     * Opt-out with {@code -Ddfc.cell_lattice=false}; the scalar
+     * {@link CompiledDensityFunction#fillArray} fallback then stays in effect and is
+     * exercised by {@code ParitySelfTest}.
+     *
+     * <p>The lattice path uses {@code INVOKEDYNAMIC + ConstantCallSite} for the
+     * helper dispatch unconditionally — a hidden class cannot {@code INVOKESTATIC}
+     * its own static methods symbolically, and we don't want to extend the
+     * {@code helperHandles[]} array's contract for this. When
+     * {@link #INDY_HELPERS_ENABLED} is false the existing {@code helper_<idx>} sites
+     * still go through the legacy MH dispatch; only {@code lattice_y} /
+     * {@code lattice_inner} ride indy.
+     */
+    public static final boolean CELL_LATTICE_ENABLED =
+            !"false".equalsIgnoreCase(System.getProperty("dfc.cell_lattice", "true"));
+
+    /** Internal name of {@code net.minecraft.world.level.levelgen.NoiseChunk} (vanilla). */
+    static final String NOISE_CHUNK_INTERNAL = "net/minecraft/world/level/levelgen/NoiseChunk";
+    /** Reference desc for a {@code NoiseChunk}. */
+    static final String NOISE_CHUNK_DESC = "L" + NOISE_CHUNK_INTERNAL + ";";
+
+    /** Method name of the cell-lattice Y-only helper. */
+    public static final String LATTICE_Y_NAME = "lattice_y";
+    /** Method name of the cell-lattice inner helper (takes precomputed Y as 3rd arg). */
+    public static final String LATTICE_INNER_NAME = "lattice_inner";
+    /** {@code (CompiledDensityFunction, FunctionContext, double) -> double} */
+    public static final String LATTICE_INNER_DESC =
+            "(L" + COMPILED_BASE_INTERNAL + ";L" + FUNCTION_CONTEXT_INTERNAL + ";D)D";
+
+    /** Internal name of {@link CompiledDensityFunction}, used by the indy bsm handle. */
+    private static final String BOOTSTRAP_OWNER = COMPILED_BASE_INTERNAL;
+    /**
+     * ASM {@link Handle} pointing at {@link CompiledDensityFunction#bootstrapHelper}.
+     *
+     * <p>The bsm signature is the standard 3-arg shape — Lookup, invokedName,
+     * invokedType — with no extra static bsm args. The helper's identity is encoded
+     * entirely in the {@code invokedName} string at the call site (e.g.
+     * {@code "helper_5"}), which keeps the same bsm reusable for the cell-lattice
+     * helpers ({@code "lattice_y"}, {@code "lattice_inner"}) introduced by Phase 2 —
+     * those use a different {@link java.lang.invoke.MethodType} but the same lookup
+     * mechanism.
+     */
+    static final Handle HELPER_BSM = new Handle(
+            Opcodes.H_INVOKESTATIC,
+            BOOTSTRAP_OWNER,
+            "bootstrapHelper",
+            "(Ljava/lang/invoke/MethodHandles$Lookup;Ljava/lang/String;Ljava/lang/invoke/MethodType;)Ljava/lang/invoke/CallSite;",
+            false);
 
     private Codegen() {}
 
@@ -174,12 +242,38 @@ public final class Codegen {
         emitCompute(cw, classInternalName, root, helpers);
         helpers.drain();
 
+        // Lattice plan (Tier B5+B6). Computed AFTER the regular helper drain so the
+        // helper indices we hand out for `lattice_y` / `lattice_inner` don't fight with
+        // the per-spill helper index allocator. The plan is purely a function of the IR
+        // shape, so any same-fingerprint cache hit will receive an identical plan and
+        // the helpers we emit now stay in lock-step with the cached bytecode.
+        boolean latticeEmitted = false;
+        if (CELL_LATTICE_ENABLED && !(root instanceof IRNode.Const)) {
+            var planOpt = CellLatticeOption.analyze(root);
+            if (planOpt.isPresent()) {
+                CellLatticeOption.LatticePlan plan = planOpt.get();
+                emitLatticeYHelper(cw, classInternalName, plan, helpers);
+                emitLatticeInnerHelper(cw, classInternalName, root, plan, helpers);
+                emitLatticeFillArrayOverride(cw, classInternalName);
+                latticeEmitted = true;
+            }
+        }
+
+        if (!latticeEmitted && root instanceof IRNode.Const c) {
+            emitConstRootFillArrayOverride(cw, c.value());
+        }
+
         cw.visitEnd();
-        return new Result(cw.toByteArray(), helpers.emittedCount());
+        return new Result(cw.toByteArray(), helpers.emittedCount(), latticeEmitted);
     }
 
-    /** Bytecode + count of helper methods generated. */
-    public record Result(byte[] bytecode, int helpersEmitted) {}
+    /**
+     * Bytecode + count of regular helper methods generated + whether a cell-lattice
+     * fast path was emitted. {@code latticeEmitted} is purely diagnostic — it is
+     * surfaced through {@link dev.denismasterherobrine.densityfunctioncompiler.compiler.pipeline.RouterPipeline}
+     * so {@code /dfc stats} can report "lattice plans: K / N roots".
+     */
+    public record Result(byte[] bytecode, int helpersEmitted, boolean latticeEmitted) {}
 
     /* --------------------------------------------------------------------- */
     /* Constructor                                                           */
@@ -379,6 +473,308 @@ public final class Codegen {
         mv.visitEnd();
     }
 
+    /**
+     * Constant root: override {@code fillArray} with {@link java.util.Arrays#fill} only, so
+     * non-const compiled DFs keep the default single-call fill path (no per-fill overhead).
+     */
+    private static void emitConstRootFillArrayOverride(ClassWriter cw, double constValue) {
+        String desc = "([DL" + CONTEXT_PROVIDER_INTERNAL + ";)V";
+        MethodVisitor mv = cw.visitMethod(Opcodes.ACC_PUBLIC, "fillArray", desc, null, null);
+        mv.visitCode();
+        mv.visitVarInsn(Opcodes.ALOAD, 1);
+        Label hasBuf = new Label();
+        mv.visitJumpInsn(Opcodes.IFNONNULL, hasBuf);
+        mv.visitInsn(Opcodes.RETURN);
+        mv.visitLabel(hasBuf);
+        mv.visitVarInsn(Opcodes.ALOAD, 1);
+        mv.visitInsn(Opcodes.ARRAYLENGTH);
+        Label nonEmpty = new Label();
+        mv.visitJumpInsn(Opcodes.IFGT, nonEmpty);
+        mv.visitInsn(Opcodes.RETURN);
+        mv.visitLabel(nonEmpty);
+        mv.visitVarInsn(Opcodes.ALOAD, 1);
+        mv.visitLdcInsn(constValue);
+        mv.visitMethodInsn(Opcodes.INVOKESTATIC, "java/util/Arrays", "fill", "([DD)V", false);
+        mv.visitInsn(Opcodes.RETURN);
+        mv.visitMaxs(0, 0);
+        mv.visitEnd();
+    }
+
+    /* --------------------------------------------------------------------- */
+    /* Cell-lattice fast path (Tier B5+B6)                                   */
+    /* --------------------------------------------------------------------- */
+
+    /**
+     * Emit the {@code lattice_y} static helper — exactly one method body that
+     * computes the {@link CellLatticeOption.LatticePlan#hoistedSubtree() hoisted
+     * Y-only subtree} given the same {@code (self, ctx)} signature as a regular
+     * helper. Called by the {@code fillArray} override once per Y-position to
+     * cache the per-Y value before the (x, z) inner loops.
+     *
+     * <p>Same {@link HelperRegistry} instance is reused so the lattice helper's
+     * per-helper child extractions thread back through the same pool that the
+     * regular helpers use — no double emission of the same extracted subtree.
+     */
+    private static void emitLatticeYHelper(ClassWriter cw, String classInternalName,
+                                           CellLatticeOption.LatticePlan plan,
+                                           HelperRegistry helpers) {
+        MethodVisitor mv = cw.visitMethod(Opcodes.ACC_PRIVATE | Opcodes.ACC_STATIC,
+                LATTICE_Y_NAME, HELPER_DESC, null, null);
+        mv.visitCode();
+        emitCoordPrologue(mv);
+        EmitState st = new EmitState(mv, classInternalName, helpers, /* castSelfForSubclassNoiseFields */ true);
+        st.emit(plan.hoistedSubtree());
+        mv.visitInsn(Opcodes.DRETURN);
+        mv.visitMaxs(0, 0);
+        mv.visitEnd();
+    }
+
+    /**
+     * Emit the {@code lattice_inner} static helper — same body as {@code compute},
+     * but the hoisted Y-only subtree is replaced everywhere with the precomputed
+     * value passed in as the third method parameter. The resulting body is the
+     * "inner expression" reused {@code cellWidth × cellWidth} times per Y-slab in
+     * the {@link #emitLatticeFillArrayOverride fillArray override}.
+     *
+     * <p>Slot layout:
+     * <ul>
+     *   <li>0 — {@code self} (CompiledDensityFunction)</li>
+     *   <li>1 — {@code ctx}  (FunctionContext)</li>
+     *   <li>2-3 — {@code yPrecomputed} (double; the third method parameter)</li>
+     * </ul>
+     *
+     * <p>The shared {@link #emitCoordPrologue} writes int blockX/Y/Z to slots
+     * 2/3/4, which would clobber the high half of {@code yPrecomputed}. We
+     * therefore copy {@code yPrecomputed} into slots 5/6 first, then run the
+     * prologue, then preinstall a spill mapping {@code hoistedSubtree → 5} on
+     * the {@link EmitState} so every {@code emit()} call that encounters the
+     * hoisted node loads the cached double instead of recomputing it. This is
+     * the precompute-cache contract we built {@code preinstallSpill} for.
+     */
+    private static void emitLatticeInnerHelper(ClassWriter cw, String classInternalName,
+                                               IRNode root,
+                                               CellLatticeOption.LatticePlan plan,
+                                               HelperRegistry helpers) {
+        MethodVisitor mv = cw.visitMethod(Opcodes.ACC_PRIVATE | Opcodes.ACC_STATIC,
+                LATTICE_INNER_NAME, LATTICE_INNER_DESC, null, null);
+        mv.visitCode();
+
+        // Copy yPrecomputed (slots 2/3) into a "safe" double slot before the
+        // coord prologue overwrites slot 2 with int blockX. Slot 5/6 is the first
+        // free slot pair past the coord-prologue slots (2, 3, 4).
+        final int yPrecomputedSlot = 5;
+        mv.visitVarInsn(Opcodes.DLOAD, 2);
+        mv.visitVarInsn(Opcodes.DSTORE, yPrecomputedSlot);
+
+        emitCoordPrologue(mv);
+
+        EmitState st = new EmitState(mv, classInternalName, helpers, /* castSelfForSubclassNoiseFields */ true);
+        st.preinstallSpill(plan.hoistedSubtree(), yPrecomputedSlot);
+        st.emit(root);
+
+        mv.visitInsn(Opcodes.DRETURN);
+        mv.visitMaxs(0, 0);
+        mv.visitEnd();
+    }
+
+    /**
+     * Emit a {@code fillArray(double[], ContextProvider)} override that drives
+     * vanilla's (y, x, z) cell triple loop directly, calling {@link #LATTICE_Y_NAME}
+     * once per Y-position and {@link #LATTICE_INNER_NAME} for every (y, x, z) cell.
+     * The override only fires when the provider is a {@code NoiseChunk}; any other
+     * provider falls through to the supertype's
+     * {@link CompiledDensityFunction#fillArray scalar path} (which is what
+     * {@code NoiseChunk.sliceFillingContextProvider} ends up using anyway, since
+     * that provider is not the {@code NoiseChunk} itself).
+     *
+     * <h2>Equivalent Java</h2>
+     * <pre>
+     * public void fillArray(double[] values, ContextProvider provider) {
+     *     if (provider instanceof NoiseChunk nc) {
+     *         nc.arrayIndex = 0;
+     *         for (int yi = nc.cellHeight - 1; yi &gt;= 0; yi--) {
+     *             nc.inCellY = yi;
+     *             double yPre = lattice_y(this, nc);
+     *             for (int xi = 0; xi &lt; nc.cellWidth; xi++) {
+     *                 nc.inCellX = xi;
+     *                 for (int zi = 0; zi &lt; nc.cellWidth; zi++) {
+     *                     nc.inCellZ = zi;
+     *                     values[nc.arrayIndex++] = lattice_inner(this, nc, yPre);
+     *                 }
+     *             }
+     *         }
+     *         return;
+     *     }
+     *     super.fillArray(values, provider);
+     * }
+     * </pre>
+     *
+     * <h2>Why not just override the inner Marker / FlatCache</h2>
+     *
+     * <p>NoiseChunk's wrap-then-iterate model already expects each
+     * {@link DensityFunction} child to drive its own {@code fillArray} via the
+     * provider — that's the existing {@code provider.fillAllDirectly(values, this)}
+     * fallback we sit on top of. The vanilla path runs the (y, x, z) triple loop in
+     * {@code NoiseChunk.fillAllDirectly}, calling {@code compute(this)} per cell
+     * — recomputing the Y-only subtree {@code cellWidth × cellWidth} times per Y.
+     * Overriding {@code fillArray} here lets us keep the same iteration order
+     * vanilla uses (so the order of side-effecting noise samples remains identical
+     * — important for parity) but lift the per-Y precompute out of the inner two
+     * loops.
+     *
+     * <h2>Correctness boundary</h2>
+     *
+     * <p>The provider check is an exact {@code INSTANCEOF NoiseChunk}, not a
+     * structural match. {@code DebugCellProvider} (a hypothetical subclass of
+     * {@code NoiseChunk} we don't ship) would still trigger the fast path; that's
+     * fine because the inner loop's only assumption is that {@code blockX/Y/Z} on
+     * the FunctionContext are derived from {@code cellStartBlockX + inCellX}, etc.
+     * — which is part of NoiseChunk's public contract.
+     *
+     * <p>Subclasses of NoiseChunk that override {@code fillAllDirectly} would
+     * normally see their override called by the supertype's {@link
+     * CompiledDensityFunction#fillArray} fallback; the lattice override skips
+     * that delegation. If a subclass needs the override-based hook, it should
+     * also override {@code fillArray} on its own DensityFunctions. None of the
+     * vanilla subclasses do.
+     */
+    private static void emitLatticeFillArrayOverride(ClassWriter cw, String classInternalName) {
+        String desc = "([DL" + CONTEXT_PROVIDER_INTERNAL + ";)V";
+        MethodVisitor mv = cw.visitMethod(Opcodes.ACC_PUBLIC, "fillArray", desc, null, null);
+        mv.visitCode();
+
+        // Slot layout:
+        //   0 = this, 1 = values[], 2 = provider,
+        //   3 = NoiseChunk (cast), 4 = cellWidth, 5 = cellHeight,
+        //   6 = yi (loop var), 7 = xi, 8 = zi,
+        //   9-10 = yPre (double).
+        Label fallback = new Label();
+
+        mv.visitVarInsn(Opcodes.ALOAD, 2);
+        mv.visitTypeInsn(Opcodes.INSTANCEOF, NOISE_CHUNK_INTERNAL);
+        mv.visitJumpInsn(Opcodes.IFEQ, fallback);
+
+        // NoiseChunk nc = (NoiseChunk) provider;
+        mv.visitVarInsn(Opcodes.ALOAD, 2);
+        mv.visitTypeInsn(Opcodes.CHECKCAST, NOISE_CHUNK_INTERNAL);
+        mv.visitVarInsn(Opcodes.ASTORE, 3);
+
+        // Hoist cellWidth / cellHeight to locals so the JIT proves the inner
+        // loop bounds are loop-invariant (NoiseChunk's fields aren't volatile,
+        // but the JVM still has to clear that with field aliasing analysis;
+        // a single load per dimension makes the bounds trivially constant for
+        // the unrolled inner loop).
+        mv.visitVarInsn(Opcodes.ALOAD, 3);
+        mv.visitFieldInsn(Opcodes.GETFIELD, NOISE_CHUNK_INTERNAL, "cellWidth", "I");
+        mv.visitVarInsn(Opcodes.ISTORE, 4);
+        mv.visitVarInsn(Opcodes.ALOAD, 3);
+        mv.visitFieldInsn(Opcodes.GETFIELD, NOISE_CHUNK_INTERNAL, "cellHeight", "I");
+        mv.visitVarInsn(Opcodes.ISTORE, 5);
+
+        // nc.arrayIndex = 0;
+        mv.visitVarInsn(Opcodes.ALOAD, 3);
+        mv.visitInsn(Opcodes.ICONST_0);
+        mv.visitFieldInsn(Opcodes.PUTFIELD, NOISE_CHUNK_INTERNAL, "arrayIndex", "I");
+
+        // for (int yi = cellHeight - 1; yi >= 0; yi--)
+        mv.visitVarInsn(Opcodes.ILOAD, 5);
+        mv.visitInsn(Opcodes.ICONST_1);
+        mv.visitInsn(Opcodes.ISUB);
+        mv.visitVarInsn(Opcodes.ISTORE, 6);
+        Label yLoopHead = new Label();
+        Label yLoopExit = new Label();
+        mv.visitLabel(yLoopHead);
+        mv.visitVarInsn(Opcodes.ILOAD, 6);
+        mv.visitJumpInsn(Opcodes.IFLT, yLoopExit);
+
+        // nc.inCellY = yi
+        mv.visitVarInsn(Opcodes.ALOAD, 3);
+        mv.visitVarInsn(Opcodes.ILOAD, 6);
+        mv.visitFieldInsn(Opcodes.PUTFIELD, NOISE_CHUNK_INTERNAL, "inCellY", "I");
+
+        // double yPre = lattice_y(this, nc);
+        mv.visitVarInsn(Opcodes.ALOAD, 0);
+        mv.visitVarInsn(Opcodes.ALOAD, 3);
+        mv.visitInvokeDynamicInsn(LATTICE_Y_NAME, HELPER_DESC, HELPER_BSM);
+        mv.visitVarInsn(Opcodes.DSTORE, 9);
+
+        // for (int xi = 0; xi < cellWidth; xi++)
+        mv.visitInsn(Opcodes.ICONST_0);
+        mv.visitVarInsn(Opcodes.ISTORE, 7);
+        Label xLoopHead = new Label();
+        Label xLoopExit = new Label();
+        mv.visitLabel(xLoopHead);
+        mv.visitVarInsn(Opcodes.ILOAD, 7);
+        mv.visitVarInsn(Opcodes.ILOAD, 4);
+        mv.visitJumpInsn(Opcodes.IF_ICMPGE, xLoopExit);
+
+        // nc.inCellX = xi
+        mv.visitVarInsn(Opcodes.ALOAD, 3);
+        mv.visitVarInsn(Opcodes.ILOAD, 7);
+        mv.visitFieldInsn(Opcodes.PUTFIELD, NOISE_CHUNK_INTERNAL, "inCellX", "I");
+
+        // for (int zi = 0; zi < cellWidth; zi++)
+        mv.visitInsn(Opcodes.ICONST_0);
+        mv.visitVarInsn(Opcodes.ISTORE, 8);
+        Label zLoopHead = new Label();
+        Label zLoopExit = new Label();
+        mv.visitLabel(zLoopHead);
+        mv.visitVarInsn(Opcodes.ILOAD, 8);
+        mv.visitVarInsn(Opcodes.ILOAD, 4);
+        mv.visitJumpInsn(Opcodes.IF_ICMPGE, zLoopExit);
+
+        // nc.inCellZ = zi
+        mv.visitVarInsn(Opcodes.ALOAD, 3);
+        mv.visitVarInsn(Opcodes.ILOAD, 8);
+        mv.visitFieldInsn(Opcodes.PUTFIELD, NOISE_CHUNK_INTERNAL, "inCellZ", "I");
+
+        // values[nc.arrayIndex++] = lattice_inner(this, nc, yPre);
+        // Stack discipline: push values, push arrayIndex (capture old), increment.
+        mv.visitVarInsn(Opcodes.ALOAD, 1);                       // values
+        mv.visitVarInsn(Opcodes.ALOAD, 3);                       // nc
+        mv.visitInsn(Opcodes.DUP);                               // nc, nc
+        mv.visitFieldInsn(Opcodes.GETFIELD, NOISE_CHUNK_INTERNAL, "arrayIndex", "I"); // nc, idx
+        mv.visitInsn(Opcodes.DUP_X1);                            // idx, nc, idx
+        mv.visitInsn(Opcodes.ICONST_1);
+        mv.visitInsn(Opcodes.IADD);                              // idx, nc, idx+1
+        mv.visitFieldInsn(Opcodes.PUTFIELD, NOISE_CHUNK_INTERNAL, "arrayIndex", "I"); // idx (post-store)
+        // Stack: values, idx (the old idx, our store target).
+        mv.visitVarInsn(Opcodes.ALOAD, 0);
+        mv.visitVarInsn(Opcodes.ALOAD, 3);
+        mv.visitVarInsn(Opcodes.DLOAD, 9);
+        mv.visitInvokeDynamicInsn(LATTICE_INNER_NAME, LATTICE_INNER_DESC, HELPER_BSM);
+        // Stack: values, idx, value(double)
+        mv.visitInsn(Opcodes.DASTORE);
+
+        // zi++
+        mv.visitIincInsn(8, 1);
+        mv.visitJumpInsn(Opcodes.GOTO, zLoopHead);
+        mv.visitLabel(zLoopExit);
+
+        // xi++
+        mv.visitIincInsn(7, 1);
+        mv.visitJumpInsn(Opcodes.GOTO, xLoopHead);
+        mv.visitLabel(xLoopExit);
+
+        // yi--
+        mv.visitIincInsn(6, -1);
+        mv.visitJumpInsn(Opcodes.GOTO, yLoopHead);
+        mv.visitLabel(yLoopExit);
+
+        mv.visitInsn(Opcodes.RETURN);
+
+        // Fallback: super.fillArray(values, provider).
+        mv.visitLabel(fallback);
+        mv.visitVarInsn(Opcodes.ALOAD, 0);
+        mv.visitVarInsn(Opcodes.ALOAD, 1);
+        mv.visitVarInsn(Opcodes.ALOAD, 2);
+        mv.visitMethodInsn(Opcodes.INVOKESPECIAL, COMPILED_BASE_INTERNAL, "fillArray", desc, false);
+        mv.visitInsn(Opcodes.RETURN);
+
+        mv.visitMaxs(0, 0);
+        mv.visitEnd();
+    }
+
     /** {@code blockX/Y/Z()} from ctx → slots 2/3/4 (int). Shared by compute() and every helper. */
     private static void emitCoordPrologue(MethodVisitor mv) {
         mv.visitVarInsn(Opcodes.ALOAD, 1);
@@ -506,6 +902,25 @@ public final class Codegen {
         }
 
         /**
+         * Pre-install a spill mapping for {@code node} → {@code doubleSlot} so the next
+         * {@link #emit(IRNode)} call that encounters {@code node} short-circuits into
+         * a single {@code DLOAD doubleSlot} instead of re-emitting its body. Used by
+         * the lattice {@code lattice_inner} helper to substitute the precomputed
+         * Y-slab value (passed in as a method parameter) for the hoisted Y-only
+         * subtree everywhere it appears in the root expression.
+         *
+         * <p>The {@code nextLocal} cursor is bumped past the end of the supplied slot
+         * range so subsequent {@link #allocDoubleSlot} calls don't collide with it.
+         */
+        void preinstallSpill(IRNode node, int doubleSlot) {
+            spillSlots.put(node, doubleSlot);
+            int after = doubleSlot + 2;
+            if (after > nextLocal) {
+                nextLocal = after;
+            }
+        }
+
+        /**
          * Captures the current spill table and local-variable cursor so a conditional
          * branch can be emitted without leaking its private spills into sibling branches
          * or the post-branch merge frame.
@@ -564,19 +979,31 @@ public final class Codegen {
 
         private void emitHelperCall(IRNode node) {
             int idx = helpers.indexOf(node);
+            if (INDY_HELPERS_ENABLED) {
+                // INVOKEDYNAMIC path — single bytecode, ConstantCallSite resolved on
+                // first hit. The bsm uses invokedName ("helper_5" etc.) to locate
+                // the static helper on this hidden class and returns a CCS bound to
+                // it; subsequent calls go through a constant-target invokestatic that
+                // the JIT can fully inline (no array load, no field load, no
+                // MH.invokeExact dispatch through the signature-polymorphic adapter).
+                mv.visitVarInsn(Opcodes.ALOAD, 0);          // self
+                mv.visitVarInsn(Opcodes.ALOAD, 1);          // ctx
+                mv.visitInvokeDynamicInsn(
+                        helperName(idx),
+                        HELPER_DESC,
+                        HELPER_BSM);
+                return;
+            }
+            // Legacy path (kept behind -Ddfc.indy_helpers=false for one release as
+            // insurance against an unforeseen LinkageError during indy bsm linkage).
             // Load the helper's MethodHandle from the inherited helperHandles[] field.
             mv.visitVarInsn(Opcodes.ALOAD, 0);
             mv.visitFieldInsn(Opcodes.GETFIELD, COMPILED_BASE_INTERNAL,
                     "helperHandles", METHOD_HANDLE_ARRAY_DESC);
             ldcInt(idx);
             mv.visitInsn(Opcodes.AALOAD);
-            // Push the actual args: self + ctx.
             mv.visitVarInsn(Opcodes.ALOAD, 0);
             mv.visitVarInsn(Opcodes.ALOAD, 1);
-            // Signature-polymorphic invokeExact whose call-site descriptor uses the
-            // supertype, not the hidden subclass — no self-reference in the constant pool.
-            // The bound MH was constructed by Compiler with this exact MethodType, so the
-            // runtime check passes.
             mv.visitMethodInsn(Opcodes.INVOKEVIRTUAL, METHOD_HANDLE_INTERNAL,
                     "invokeExact", HELPER_DESC, false);
         }

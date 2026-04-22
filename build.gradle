@@ -40,6 +40,15 @@ neoForge {
             //   ./gradlew runClient -Ddfc.parity=true
             // or temporarily uncomment:
             // systemProperty 'dfc.parity', 'true'
+            
+        }
+
+        // DFC vector API (jdk.incubator.vector). Use: ./gradlew runClientVector
+        clientVector {
+            client()
+            systemProperty 'neoforge.enabledGameTestNamespaces', project.mod_id
+            systemProperty 'dfc.vector', 'on'
+            jvmArgument '--add-modules=jdk.incubator.vector'
         }
 
         server {

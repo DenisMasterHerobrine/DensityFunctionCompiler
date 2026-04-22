@@ -2,6 +2,7 @@ package dev.denismasterherobrine.densityfunctioncompiler;
 
 import com.mojang.logging.LogUtils;
 import dev.denismasterherobrine.densityfunctioncompiler.compiler.pipeline.RegistryWarmer;
+import dev.denismasterherobrine.densityfunctioncompiler.compiler.vector.DfcVectorSupport;
 import dev.denismasterherobrine.densityfunctioncompiler.debug.DfcCommand;
 import net.neoforged.bus.api.IEventBus;
 import net.neoforged.fml.ModContainer;
@@ -19,6 +20,7 @@ public class DensityFunctionCompiler {
 
     public DensityFunctionCompiler(IEventBus modBus, ModContainer container) {
         LOGGER.info("DensityFunctionCompiler initialising — runtime DF JIT pipeline enabling.");
+        DfcVectorSupport.logStatusOnce();
         var bus = NeoForge.EVENT_BUS;
         bus.addListener(DensityFunctionCompiler::onRegisterCommands);
         bus.addListener(DensityFunctionCompiler::onServerStarting);

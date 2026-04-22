@@ -4,6 +4,8 @@
   "package": "dev.denismasterherobrine.densityfunctioncompiler.mixin",
   "compatibilityLevel": "JAVA_21",
   "mixins": [
+    "NoiseChunkSessionMixin",
+    "NoiseRouterMixin",
     "RandomStateMixin",
     "noise.NormalNoiseAccessor",
     "noise.PerlinNoiseAccessor",
