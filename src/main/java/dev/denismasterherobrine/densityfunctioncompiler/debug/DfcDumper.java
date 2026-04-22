@@ -32,10 +32,11 @@ public final class DfcDumper {
         var stats = RouterPipeline.snapshotStats();
         src.sendSuccess(() -> Component.literal(
                 ("DFC dump: %d compiled roots, %d unique IR nodes, %d hidden classes alive, "
-                        + "%d node references collapsed by CSE, %d helper methods emitted")
+                        + "%d node references collapsed by CSE, %d helper methods emitted, "
+                        + "%d optimizer rewrite passes")
                         .formatted(stats.rootsCompiled(), stats.uniqueNodes(),
                                 stats.classesAlive(), stats.savedByCse(),
-                                stats.helpersEmitted())), false);
+                                stats.helpersEmitted(), stats.optimizerRewrites())), false);
     }
 
     /**

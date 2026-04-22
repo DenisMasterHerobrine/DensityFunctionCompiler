@@ -889,11 +889,26 @@ public final class Codegen {
         }
 
         private void emitBlendDensity(IRNode.BlendDensity bd) {
+            // Evaluate the input first with a clean operand stack so any branchy code
+            // inside (RangeChoice arms, nested Spline.Multipoint ladders) doesn't have
+            // to merge frames while Blender+ctx are sitting on the operand stack. The
+            // previous emission order pushed Blender, ctx, then ran emit(bd.input()) —
+            // when the input contained a BranchScope-using subtree, ASM's COMPUTE_FRAMES
+            // would merge divergent arm frames at the join label and slots written on
+            // only some arms became TOP. Subsequent DLOADs of those slots from the
+            // outer scope's spill table then failed verification with
+            // "get long/double overflows locals" (see CompiledDF_18 in run-output-fixed.log).
+            // Spilling to a fresh slot first costs one extra DSTORE/DLOAD pair per call
+            // and serialises the side-effects cleanly.
+            emit(bd.input());
+            int dSlot = allocDoubleSlot();
+            mv.visitVarInsn(Opcodes.DSTORE, dSlot);
+
             mv.visitVarInsn(Opcodes.ALOAD, 1);
             mv.visitMethodInsn(Opcodes.INVOKEINTERFACE, FUNCTION_CONTEXT_INTERNAL,
                     "getBlender", "()Lnet/minecraft/world/level/levelgen/blending/Blender;", true);
             mv.visitVarInsn(Opcodes.ALOAD, 1);
-            emit(bd.input());
+            mv.visitVarInsn(Opcodes.DLOAD, dSlot);
             mv.visitMethodInsn(Opcodes.INVOKEVIRTUAL,
                     "net/minecraft/world/level/levelgen/blending/Blender",
                     "blendDensity",

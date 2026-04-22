@@ -19,6 +19,13 @@ public final class RouterPipeline {
     private static final AtomicLong UNIQUE_NODES_TOTAL = new AtomicLong();
     private static final AtomicLong CSE_SAVINGS_TOTAL = new AtomicLong();
     private static final AtomicLong HELPERS_TOTAL = new AtomicLong();
+    /** Cumulative count of fixpoint iterations across all compiled roots that
+     *  produced at least one peephole rewrite. A near-zero value here means the
+     *  routers are already canonical and the {@link
+     *  dev.denismasterherobrine.densityfunctioncompiler.compiler.ir.IROptimizer}
+     *  pass is mostly an identity walk; a high value suggests the upstream JSON
+     *  is leaving a lot of foldable structure on the table. */
+    private static final AtomicLong OPT_REWRITES_TOTAL = new AtomicLong();
 
     private RouterPipeline() {}
 
@@ -156,12 +163,16 @@ public final class RouterPipeline {
         if (helpersEmitted > 0) HELPERS_TOTAL.addAndGet(helpersEmitted);
     }
 
+    public static void recordOptimizerRewrites(int rewrites) {
+        if (rewrites > 0) OPT_REWRITES_TOTAL.addAndGet(rewrites);
+    }
+
     public static void recordCompiledClassDropped() {
         CLASSES_ALIVE.decrementAndGet();
     }
 
     public record Stats(int rootsCompiled, int classesAlive, long uniqueNodes,
-                         long savedByCse, long helpersEmitted) {}
+                         long savedByCse, long helpersEmitted, long optimizerRewrites) {}
 
     public static Stats snapshotStats() {
         return new Stats(
@@ -169,6 +180,7 @@ public final class RouterPipeline {
                 CLASSES_ALIVE.get(),
                 UNIQUE_NODES_TOTAL.get(),
                 CSE_SAVINGS_TOTAL.get(),
-                HELPERS_TOTAL.get());
+                HELPERS_TOTAL.get(),
+                OPT_REWRITES_TOTAL.get());
     }
 }

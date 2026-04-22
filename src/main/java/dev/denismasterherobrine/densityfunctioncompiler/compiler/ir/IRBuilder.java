@@ -130,9 +130,29 @@ public final class IRBuilder {
 
         if (df instanceof DensityFunctions.MulOrAdd ma) {
             // MulOrAdd(arg, ADD) -> arg + constant; (arg, MUL) -> arg * constant.
+            //
+            // Short-circuit identity arguments at build time: a vanilla
+            // TwoArgumentSimpleFunction.create(ADD/MUL, a, b) often degenerates into
+            // MulOrAdd when one side is constant, and the constant is frequently the
+            // identity (0 for ADD, 1 for MUL) — typically because a JSON template
+            // adds an offset that some other layer left at 0. Folding here saves the
+            // optimizer one rewrite pass and, more importantly, keeps the IR Bin
+            // count down so RefCount/Splitter see a tighter graph.
+            //
+            // Note: Double.compare keeps -0.0 distinct from 0.0 — important because
+            // (-0.0) + x is NOT always == x in IEEE 754 (it differs only at x = -0.0,
+            // but that's enough to break parity).
             IRNode inputIr = walk(ma.input());
-            IRNode constIr = intern(new IRNode.Const(ma.argument()));
-            IRNode.BinOp op = ma.specificType() == DensityFunctions.MulOrAdd.Type.ADD
+            double arg = ma.argument();
+            DensityFunctions.MulOrAdd.Type type = ma.specificType();
+            if (type == DensityFunctions.MulOrAdd.Type.ADD && Double.compare(arg, 0.0) == 0) {
+                return inputIr;
+            }
+            if (type == DensityFunctions.MulOrAdd.Type.MUL && Double.compare(arg, 1.0) == 0) {
+                return inputIr;
+            }
+            IRNode constIr = intern(new IRNode.Const(arg));
+            IRNode.BinOp op = type == DensityFunctions.MulOrAdd.Type.ADD
                     ? IRNode.BinOp.ADD : IRNode.BinOp.MUL;
             return intern(new IRNode.Bin(op, inputIr, constIr));
         }

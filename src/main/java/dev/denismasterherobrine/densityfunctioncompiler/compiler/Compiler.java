@@ -9,6 +9,7 @@ import dev.denismasterherobrine.densityfunctioncompiler.compiler.codegen.Splitte
 import dev.denismasterherobrine.densityfunctioncompiler.compiler.ir.Bounds;
 import dev.denismasterherobrine.densityfunctioncompiler.compiler.ir.IRBuilder;
 import dev.denismasterherobrine.densityfunctioncompiler.compiler.ir.IRNode;
+import dev.denismasterherobrine.densityfunctioncompiler.compiler.ir.IROptimizer;
 import dev.denismasterherobrine.densityfunctioncompiler.compiler.ir.RefCount;
 import dev.denismasterherobrine.densityfunctioncompiler.compiler.pipeline.CompilingVisitor;
 import dev.denismasterherobrine.densityfunctioncompiler.compiler.pipeline.RouterPipeline;
@@ -54,6 +55,15 @@ public final class Compiler {
             ConstantPool pool = new ConstantPool();
             IRBuilder builder = new IRBuilder(pool, CompilingVisitor.global());
             IRNode root = builder.build(df);
+
+            // Peephole pass: constant folding, algebraic identities, RangeChoice
+            // short-circuiting, cost-aware strength reduction. Runs before Bounds /
+            // RefCount / Splitter so downstream stages see the post-rewrite DAG.
+            // Every rewritten node is re-interned through the same IRBuilder, so
+            // hash-consing / CSE stay consistent.
+            IROptimizer.Result optResult = IROptimizer.optimize(root, builder, pool);
+            root = optResult.root();
+            int optimizerRewrites = optResult.rewrites();
 
             int uniqueNodes = builder.internedCount();
             int cseSavings = builder.cseSavings();
@@ -142,9 +152,11 @@ public final class Compiler {
 
             RouterPipeline.recordCompiledRoot(uniqueNodes, cseSavings);
             RouterPipeline.recordHelpers(helpersEmitted);
+            RouterPipeline.recordOptimizerRewrites(optimizerRewrites);
 
             return new Result(compiled, root, rc, pool, bytecode, className,
-                    uniqueNodes, cseSavings, helpersEmitted, minVal, maxVal);
+                    uniqueNodes, cseSavings, helpersEmitted, optimizerRewrites,
+                    minVal, maxVal);
         } catch (Throwable t) {
             DensityFunctionCompiler.LOGGER.warn(
                     "Compilation failed for {} ({}): {} — falling back to vanilla evaluator",
@@ -166,6 +178,7 @@ public final class Compiler {
             int uniqueNodes,
             int cseSavings,
             int helpersEmitted,
+            int optimizerRewrites,
             double minValue,
             double maxValue) {}
 }

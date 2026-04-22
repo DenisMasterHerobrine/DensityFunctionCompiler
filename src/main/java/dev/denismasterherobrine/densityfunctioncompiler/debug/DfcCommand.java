@@ -30,9 +30,11 @@ public final class DfcCommand {
                 .then(Commands.literal("stats").executes(ctx -> {
                     var stats = RouterPipeline.snapshotStats();
                     ctx.getSource().sendSuccess(() -> Component.literal(
-                            "DFC: %d roots compiled, %d unique IR nodes, %d hidden classes alive, %d helpers emitted"
+                            ("DFC: %d roots compiled, %d unique IR nodes, %d hidden classes alive, "
+                                    + "%d helpers emitted, %d optimizer rewrite passes")
                                     .formatted(stats.rootsCompiled(), stats.uniqueNodes(),
-                                            stats.classesAlive(), stats.helpersEmitted())),
+                                            stats.classesAlive(), stats.helpersEmitted(),
+                                            stats.optimizerRewrites())),
                             false);
                     return 1;
                 }))
