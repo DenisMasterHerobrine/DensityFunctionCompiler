@@ -1,0 +1,231 @@
+package dev.denismasterherobrine.densityfunctioncompiler.compiler.ir;
+
+import dev.denismasterherobrine.densityfunctioncompiler.compiler.codegen.ConstantPool;
+import dev.denismasterherobrine.densityfunctioncompiler.compiler.pipeline.CompilingVisitor;
+import dev.denismasterherobrine.densityfunctioncompiler.compiler.spline.SplineInliner;
+import net.minecraft.util.CubicSpline;
+import net.minecraft.world.level.levelgen.DensityFunction;
+import net.minecraft.world.level.levelgen.DensityFunctions;
+
+import java.util.HashMap;
+import java.util.Map;
+
+/**
+ * Walks a {@link DensityFunction} tree and produces a hash-consed {@link IRNode} DAG.
+ *
+ * <p>Three rules govern descent:
+ * <ul>
+ *   <li><b>Markers stop descent.</b> {@link DensityFunctions.Marker} (and its
+ *       {@code MarkerOrMarked} interface) is a contract with {@code NoiseChunk}: it must
+ *       round-trip so the chunk can wrap the inner subtree in a cell cache. We capture
+ *       the entire marker as an extern and emit it verbatim — but the inner tree can
+ *       still be compiled via {@link CompilingVisitor}, which the visitor cache will
+ *       call recursively.</li>
+ *   <li><b>Recognised nodes inline.</b> Every vanilla {@code DensityFunctions.*} record
+ *       is destructured into the matching IR node, recursing into children so they too
+ *       end up inline.</li>
+ *   <li><b>Unrecognised nodes invoke.</b> Anything we don't recognise becomes
+ *       {@link IRNode.Invoke}, captured by identity into the constant pool. The codegen
+ *       calls it through {@code INVOKEINTERFACE DensityFunction.compute}.</li>
+ * </ul>
+ */
+public final class IRBuilder {
+
+    private final ConstantPool pool;
+    private final CompilingVisitor outerVisitor;
+
+    /** Hash-cons table — interns equal IR nodes to the same instance. */
+    private final Map<IRNode, IRNode> intern = new HashMap<>();
+
+    private long internRequests; // number of times intern() was called (pre-dedup count)
+
+    public IRBuilder(ConstantPool pool, CompilingVisitor outerVisitor) {
+        this.pool = pool;
+        this.outerVisitor = outerVisitor;
+    }
+
+    public IRNode build(DensityFunction df) {
+        return walk(df);
+    }
+
+    public int internedCount() {
+        return intern.size();
+    }
+
+    /** Number of node-references collapsed by hash-consing (a CSE proxy metric). */
+    public int cseSavings() {
+        long delta = internRequests - intern.size();
+        return delta < 0 ? 0 : (int) Math.min(delta, Integer.MAX_VALUE);
+    }
+
+    public ConstantPool pool() { return pool; }
+
+    public IRNode intern(IRNode node) {
+        internRequests++;
+        IRNode existing = intern.get(node);
+        if (existing != null) return existing;
+        intern.put(node, node);
+        return node;
+    }
+
+    /* --------------------------------------------------------------------- */
+    /* Recognised vanilla nodes                                              */
+    /* --------------------------------------------------------------------- */
+
+    private IRNode walk(DensityFunction df) {
+        // Marker boundary — capture the WHOLE marker as an extern, but ask the visitor
+        // to compile its inner child first so the chunk-cache wrapper sees a Marker(type,
+        // COMPILED). The visitor caches the repackaged Marker by source identity, so
+        // multiple references to the same source marker collapse to a single extern slot
+        // here (which keeps NoiseChunk's identity-based interpolator dedup tight).
+        if (df instanceof DensityFunctions.MarkerOrMarked marker) {
+            DensityFunction repackaged = outerVisitor.apply(marker);
+            int idx = pool.internExtern(repackaged);
+            return intern(new IRNode.Marker(idx));
+        }
+
+        // Holder indirection — peel and recurse. We do NOT compile the held DF as a
+        // separate unit here; we want it inlined into the current bytecode so a router
+        // field that's "holderHolder(barrierNoise)" generates one CompiledDF, not two.
+        if (df instanceof DensityFunctions.HolderHolder hh) {
+            return walk(hh.function().value());
+        }
+
+        // Pre-compiled CompiledDF — keep it opaque, do NOT re-compile or descend. This
+        // happens when an outer compile feeds us the result of a child compile via the
+        // visitor (e.g. a registry-warmed density_function that's already been compiled).
+        if (df instanceof dev.denismasterherobrine.densityfunctioncompiler.compiler.codegen.CompiledDensityFunction) {
+            int idx = pool.internExtern(df);
+            return intern(new IRNode.Invoke(idx));
+        }
+
+        // Identity-significant sentinels that NoiseChunk swaps with chunk-bound
+        // implementations during wrap. Wrapping these in a CompiledDF would break the
+        // identity check and the chunk would hand back the no-op Blender output, which
+        // collapses biome blending and surface beardifier carving.
+        if (df instanceof DensityFunctions.BlendAlpha
+                || df instanceof DensityFunctions.BlendOffset
+                || df == DensityFunctions.BeardifierMarker.INSTANCE) {
+            int idx = pool.internExtern(df);
+            return intern(new IRNode.Invoke(idx));
+        }
+
+        if (df instanceof DensityFunctions.Constant c) {
+            return intern(new IRNode.Const(c.value()));
+        }
+
+        if (df instanceof DensityFunctions.YClampedGradient g) {
+            return intern(new IRNode.YClampedGradient(g.fromY(), g.toY(), g.fromValue(), g.toValue()));
+        }
+
+        if (df instanceof DensityFunctions.Clamp c) {
+            return intern(new IRNode.Clamp(walk(c.input()), c.minValue(), c.maxValue()));
+        }
+
+        if (df instanceof DensityFunctions.RangeChoice rc) {
+            return intern(new IRNode.RangeChoice(
+                    walk(rc.input()), rc.minInclusive(), rc.maxExclusive(),
+                    walk(rc.whenInRange()), walk(rc.whenOutOfRange())));
+        }
+
+        if (df instanceof DensityFunctions.MulOrAdd ma) {
+            // MulOrAdd(arg, ADD) -> arg + constant; (arg, MUL) -> arg * constant.
+            IRNode inputIr = walk(ma.input());
+            IRNode constIr = intern(new IRNode.Const(ma.argument()));
+            IRNode.BinOp op = ma.specificType() == DensityFunctions.MulOrAdd.Type.ADD
+                    ? IRNode.BinOp.ADD : IRNode.BinOp.MUL;
+            return intern(new IRNode.Bin(op, inputIr, constIr));
+        }
+
+        if (df instanceof DensityFunctions.TwoArgumentSimpleFunction tas) {
+            IRNode left  = walk(tas.argument1());
+            IRNode right = walk(tas.argument2());
+            IRNode.BinOp op = switch (tas.type()) {
+                case ADD -> IRNode.BinOp.ADD;
+                case MUL -> IRNode.BinOp.MUL;
+                case MIN -> IRNode.BinOp.MIN;
+                case MAX -> IRNode.BinOp.MAX;
+            };
+            return intern(new IRNode.Bin(op, left, right));
+        }
+
+        if (df instanceof DensityFunctions.Mapped m) {
+            IRNode input = walk(m.input());
+            IRNode.UnaryOp op = switch (m.type()) {
+                case ABS -> IRNode.UnaryOp.ABS;
+                case SQUARE -> IRNode.UnaryOp.SQUARE;
+                case CUBE -> IRNode.UnaryOp.CUBE;
+                case HALF_NEGATIVE -> IRNode.UnaryOp.HALF_NEGATIVE;
+                case QUARTER_NEGATIVE -> IRNode.UnaryOp.QUARTER_NEGATIVE;
+                case SQUEEZE -> IRNode.UnaryOp.SQUEEZE;
+            };
+            return intern(new IRNode.Unary(op, input));
+        }
+
+        if (df instanceof DensityFunctions.Noise n) {
+            var noise = n.noise().noise();
+            if (noise == null) return intern(new IRNode.Const(0.0));
+            int idx = pool.internNoise(noise);
+            return intern(new IRNode.Noise(idx, n.xzScale(), n.yScale(), n.noise().maxValue()));
+        }
+
+        if (df instanceof DensityFunctions.ShiftedNoise sn) {
+            var noise = sn.noise().noise();
+            if (noise == null) return intern(new IRNode.Const(0.0));
+            int idx = pool.internNoise(noise);
+            IRNode sx = walk(sn.shiftX());
+            IRNode sy = walk(sn.shiftY());
+            IRNode sz = walk(sn.shiftZ());
+            return intern(new IRNode.ShiftedNoise(idx, sn.xzScale(), sn.yScale(), sx, sy, sz, sn.noise().maxValue()));
+        }
+
+        if (df instanceof DensityFunctions.ShiftA sa) {
+            var noise = sa.offsetNoise().noise();
+            if (noise == null) return intern(new IRNode.Const(0.0));
+            int idx = pool.internNoise(noise);
+            return intern(new IRNode.ShiftA(idx, sa.offsetNoise().maxValue()));
+        }
+        if (df instanceof DensityFunctions.ShiftB sb) {
+            var noise = sb.offsetNoise().noise();
+            if (noise == null) return intern(new IRNode.Const(0.0));
+            int idx = pool.internNoise(noise);
+            return intern(new IRNode.ShiftB(idx, sb.offsetNoise().maxValue()));
+        }
+        if (df instanceof DensityFunctions.Shift s) {
+            var noise = s.offsetNoise().noise();
+            if (noise == null) return intern(new IRNode.Const(0.0));
+            int idx = pool.internNoise(noise);
+            return intern(new IRNode.Shift(idx, s.offsetNoise().maxValue()));
+        }
+
+        if (df instanceof DensityFunctions.WeirdScaledSampler wss) {
+            var noise = wss.noise().noise();
+            if (noise == null) return intern(new IRNode.Const(0.0));
+            int idx = pool.internNoise(noise);
+            IRNode input = walk(wss.input());
+            return intern(new IRNode.WeirdScaled(input, idx, wss.rarityValueMapper().ordinal(),
+                    wss.rarityValueMapper().ordinal() == 0
+                            ? 2.0 * wss.noise().maxValue()
+                            : 3.0 * wss.noise().maxValue()));
+        }
+
+        if (df instanceof DensityFunctions.BlendDensity bd) {
+            return intern(new IRNode.BlendDensity(walk(bd.input())));
+        }
+
+        if (df instanceof DensityFunctions.Spline splineDf) {
+            return new SplineInliner(this).inline(splineDf.spline());
+        }
+
+        // EndIslands and BlendAlpha/BlendOffset/Beardifier are simple but special — go
+        // through Invoke for now (they're not on the hot path frequency-wise; correctness
+        // first).
+        int idx = pool.internExtern(df);
+        return intern(new IRNode.Invoke(idx));
+    }
+
+    /** Helper used by {@link SplineInliner} to walk a spline coordinate's underlying DF. */
+    public IRNode walkChild(DensityFunction df) {
+        return walk(df);
+    }
+}
