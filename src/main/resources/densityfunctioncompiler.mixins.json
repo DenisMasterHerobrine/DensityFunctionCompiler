@@ -6,7 +6,8 @@
   "mixins": [
     "RandomStateMixin",
     "noise.NormalNoiseAccessor",
-    "noise.PerlinNoiseAccessor"
+    "noise.PerlinNoiseAccessor",
+    "noise.BlendedNoiseAccessor"
   ],
   "client": [
   ],

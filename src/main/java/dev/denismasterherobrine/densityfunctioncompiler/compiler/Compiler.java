@@ -12,6 +12,7 @@ import dev.denismasterherobrine.densityfunctioncompiler.compiler.ir.IRNode;
 import dev.denismasterherobrine.densityfunctioncompiler.compiler.ir.IROptimizer;
 import dev.denismasterherobrine.densityfunctioncompiler.compiler.ir.NoiseExpander;
 import dev.denismasterherobrine.densityfunctioncompiler.compiler.ir.RefCount;
+import dev.denismasterherobrine.densityfunctioncompiler.compiler.noise.BlendedNoiseSpec;
 import dev.denismasterherobrine.densityfunctioncompiler.compiler.pipeline.CompilingVisitor;
 import dev.denismasterherobrine.densityfunctioncompiler.compiler.pipeline.RouterPipeline;
 import net.minecraft.world.level.levelgen.DensityFunction;
@@ -178,6 +179,7 @@ public final class Compiler {
             RouterPipeline.recordHelpers(helpersEmitted);
             RouterPipeline.recordOptimizerRewrites(optimizerRewrites);
             RouterPipeline.recordNoiseInline(noisesSpecialized, octavesUnrolled);
+            RouterPipeline.recordBlendedInline(pool.blendedNoiseSpecCount(), countBlendedNonNullOctaves(pool));
 
             return new Result(compiled, root, rc, pool, bytecode, className,
                     uniqueNodes, cseSavings, helpersEmitted, optimizerRewrites,
@@ -191,6 +193,23 @@ public final class Compiler {
                     t.toString(), t);
             return null;
         }
+    }
+
+    private static long countBlendedNonNullOctaves(ConstantPool pool) {
+        long t = 0;
+        for (int i = 0; i < pool.blendedNoiseSpecCount(); i++) {
+            BlendedNoiseSpec s = pool.blendedNoiseSpec(i);
+            for (var x : s.mainOctaves()) {
+                if (x != null) t++;
+            }
+            for (var x : s.minLimitOctaves()) {
+                if (x != null) t++;
+            }
+            for (var x : s.maxLimitOctaves()) {
+                if (x != null) t++;
+            }
+        }
+        return t;
     }
 
     /** Diagnostic snapshot of one compile() call. */

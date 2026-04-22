@@ -239,8 +239,11 @@ public final class IRBuilder {
             return new SplineInliner(this).inline(splineDf.spline());
         }
 
-        if (df instanceof BlendedNoise) {
-            // Registry "old_blended_noise" type — not a DensityFunctions record; still evaluated via INVOKEINTERFACE.
+        if (df instanceof BlendedNoise blended && df.getClass() == BlendedNoise.class) {
+            int specIdx = pool.internBlendedNoiseSpec(blended);
+            if (specIdx >= 0) {
+                return intern(new IRNode.InlinedBlendedNoise(specIdx, blended.maxValue()));
+            }
             int idx = pool.internExtern(df);
             return intern(new IRNode.Invoke(idx));
         }

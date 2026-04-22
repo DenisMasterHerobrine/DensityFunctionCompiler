@@ -1,8 +1,11 @@
 package dev.denismasterherobrine.densityfunctioncompiler.compiler.codegen;
 
+import dev.denismasterherobrine.densityfunctioncompiler.compiler.noise.BlendedNoiseSpec;
+import dev.denismasterherobrine.densityfunctioncompiler.compiler.noise.BlendedNoiseSpecCache;
 import dev.denismasterherobrine.densityfunctioncompiler.compiler.noise.NoiseSpec;
 import dev.denismasterherobrine.densityfunctioncompiler.compiler.noise.NoiseSpecCache;
 import net.minecraft.world.level.levelgen.DensityFunction;
+import net.minecraft.world.level.levelgen.synth.BlendedNoise;
 import net.minecraft.world.level.levelgen.synth.ImprovedNoise;
 import net.minecraft.world.level.levelgen.synth.NormalNoise;
 
@@ -49,6 +52,9 @@ public final class ConstantPool {
      */
     private final List<NoiseSpec> noiseSpecs = new ArrayList<>();
     private final IdentityHashMap<NormalNoise, Integer> noiseSpecIndex = new IdentityHashMap<>();
+
+    private final List<BlendedNoiseSpec> blendedNoiseSpecs = new ArrayList<>();
+    private final IdentityHashMap<BlendedNoise, Integer> blendedNoiseSpecIndex = new IdentityHashMap<>();
 
     /** Intern a double, returning its slot in the {@code constants} array. */
     public int intern(double value) {
@@ -132,19 +138,63 @@ public final class ConstantPool {
     public List<NoiseSpec> noiseSpecs() { return noiseSpecs; }
 
     /**
-     * Flatten every interned {@link NoiseSpec} into the {@code Object[] noiseOctaves}
-     * array passed to the generated subclass's constructor. Layout per spec:
-     * <pre>
-     *   [first.activeOctaves...] [second.activeOctaves...]
-     * </pre>
-     * Specs are concatenated in spec-pool order. The codegen holds a static base
-     * offset per spec (computed below) and reads through {@code AALOAD + CHECKCAST
-     * ImprovedNoise} from this single Object[] into per-octave typed final fields.
+     * Intern {@link BlendedNoise} for inlined {@link IRNode.InlinedBlendedNoise} emission.
+     * Returns {@code -1} when the spec cannot be read (mixin failure).
+     */
+    public int internBlendedNoiseSpec(BlendedNoise noise) {
+        Integer existing = blendedNoiseSpecIndex.get(noise);
+        if (existing != null) return existing;
+        BlendedNoiseSpec spec = BlendedNoiseSpecCache.specFor(noise);
+        if (spec == null) return -1;
+        int next = blendedNoiseSpecs.size();
+        blendedNoiseSpecs.add(spec);
+        blendedNoiseSpecIndex.put(noise, next);
+        return next;
+    }
+
+    public BlendedNoiseSpec blendedNoiseSpec(int idx) { return blendedNoiseSpecs.get(idx); }
+    public int blendedNoiseSpecCount() { return blendedNoiseSpecs.size(); }
+
+    /**
+     * Sum of all {@link ImprovedNoise} payload slots from {@link #noiseSpecs} (NormalNoise
+     * inlining) — the blended section starts at this offset in {@link #finishNoiseOctaves()}.
+     */
+    public int totalNormalNoisePayloadSlots() {
+        int t = 0;
+        for (NoiseSpec s : noiseSpecs) t += s.totalActiveOctaves();
+        return t;
+    }
+
+    /**
+     * Base index into the flat {@code noiseOctaves} constructor payload for blended spec
+     * {@code blendedSpecIndex}.
+     */
+    public int blendedSpecPayloadBase(int blendedSpecIndex) {
+        return totalNormalNoisePayloadSlots() + blendedSpecIndex * BlendedNoiseSpec.PAYLOAD_IMPROVED_NOISES;
+    }
+
+    /**
+     * Index into the flat {@code noiseOctaves} array for a blended sampler field
+     * ({@code section} 0 = main, 1 = min limit, 2 = max limit).
+     */
+    public int blendedPayloadIndex(int blendedSpecIndex, int section, int subIndex) {
+        int base = blendedSpecPayloadBase(blendedSpecIndex);
+        if (section == 0) return base + subIndex; // 0..7
+        if (section == 1) return base + 8 + subIndex; // 0..15
+        return base + 8 + 16 + subIndex; // 0..15
+    }
+
+    /**
+     * Flatten every interned {@link NoiseSpec} and {@link BlendedNoiseSpec} into the
+     * {@code Object[] noiseOctaves} array passed to the generated subclass's constructor.
+     * <p>Layout: every {@code NoiseSpec} in order [first, second] active octaves, then
+     * each {@code BlendedNoiseSpec} as
+     * {@code [main0..7][min0..15][max0..15]} (nulls included when an octave is absent).
      */
     public Object[] finishNoiseOctaves() {
-        int total = 0;
-        for (NoiseSpec s : noiseSpecs) total += s.totalActiveOctaves();
-        Object[] out = new Object[total];
+        int totalN = totalNormalNoisePayloadSlots();
+        int totalB = blendedNoiseSpecs.size() * BlendedNoiseSpec.PAYLOAD_IMPROVED_NOISES;
+        Object[] out = new Object[totalN + totalB];
         int cursor = 0;
         for (NoiseSpec s : noiseSpecs) {
             for (ImprovedNoise oct : s.first().activeOctaves()) {
@@ -152,6 +202,17 @@ public final class ConstantPool {
             }
             for (ImprovedNoise oct : s.second().activeOctaves()) {
                 out[cursor++] = oct;
+            }
+        }
+        for (BlendedNoiseSpec b : blendedNoiseSpecs) {
+            for (int i = 0; i < BlendedNoiseSpec.MAIN_OCTAVES; i++) {
+                out[cursor++] = b.mainOctaves()[i];
+            }
+            for (int j = 0; j < BlendedNoiseSpec.LIMIT_OCTAVES; j++) {
+                out[cursor++] = b.minLimitOctaves()[j];
+            }
+            for (int j = 0; j < BlendedNoiseSpec.LIMIT_OCTAVES; j++) {
+                out[cursor++] = b.maxLimitOctaves()[j];
             }
         }
         return out;

@@ -33,6 +33,7 @@ public final class IrTreeSupport {
             case IRNode.Shift s -> List.of();
             case IRNode.WeirdScaled w -> List.of(w.input());
             case IRNode.InlinedNoise in -> List.of(in.coordX(), in.coordY(), in.coordZ());
+            case IRNode.InlinedBlendedNoise ibn -> List.of();
             case IRNode.WeirdRarity wr -> List.of(wr.input());
             case IRNode.EndIslands e -> List.of();
             case IRNode.Spline.Constant sc -> List.of();

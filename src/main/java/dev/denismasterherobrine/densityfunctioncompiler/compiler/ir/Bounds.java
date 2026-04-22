@@ -74,6 +74,7 @@ public final class Bounds {
             // propagated NormalNoise.maxValue() captured at NoiseExpander time, so even
             // routers that sample noise at multiple scales bound correctly).
             case IRNode.InlinedNoise n -> new double[]{-n.maxValue(), n.maxValue()};
+            case IRNode.InlinedBlendedNoise b -> new double[]{-b.maxValue(), b.maxValue()};
             // WeirdRarity codomain is fixed by the rarity-table values in
             // Runtime.weirdRarity: {0.5, 0.75, 1.0, 1.5, 2.0, 3.0}. The widest
             // ordinal-2 (RarityValueMapper.TYPE2/2D) hits 3.0; ordinal-1 (TYPE1/3D)

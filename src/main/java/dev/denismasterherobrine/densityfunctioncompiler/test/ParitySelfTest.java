@@ -2,6 +2,7 @@ package dev.denismasterherobrine.densityfunctioncompiler.test;
 
 import dev.denismasterherobrine.densityfunctioncompiler.DensityFunctionCompiler;
 import dev.denismasterherobrine.densityfunctioncompiler.compiler.Compiler;
+import dev.denismasterherobrine.densityfunctioncompiler.compiler.codegen.CompiledDensityFunction;
 import dev.denismasterherobrine.densityfunctioncompiler.debug.DfcDumper;
 import net.minecraft.commands.CommandSourceStack;
 import net.minecraft.core.Registry;
@@ -11,9 +12,11 @@ import net.minecraft.world.level.levelgen.DensityFunction;
 import net.minecraft.world.level.levelgen.DensityFunctions;
 import net.minecraft.world.level.levelgen.NoiseGeneratorSettings;
 import net.minecraft.world.level.levelgen.NoiseRouter;
+import net.minecraft.world.level.levelgen.synth.BlendedNoise;
 
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Random;
 
 /**
  * Standalone parity self-test for the arithmetic / control-flow subset of the JIT.
@@ -250,6 +253,60 @@ public final class ParitySelfTest {
         DensityFunctionCompiler.LOGGER.info("DFC noise self-test: {}/{} passed", passed, total);
         for (String f : failures) {
             DensityFunctionCompiler.LOGGER.warn("  noise fail: {}", f);
+        }
+        return new SuiteResult(total, passed, failures);
+    }
+
+    /**
+     * Bit-exact {@link BlendedNoise} parity: same parameters as
+     * {@link VanillaDensityFunctionCoverage} factory coverage, random
+     * {@link DensityFunction.SinglePointContext} grid, {@code doubleToLongBits} on
+     * {@code compute} results.
+     */
+    public static SuiteResult runBlendedNoiseParity() {
+        List<String> failures = new ArrayList<>();
+        int total = 1;
+        int passed = 0;
+        DensityFunction original = BlendedNoise.createUnseeded(0.1, 0.2, 0.3, 0.4, 2.0);
+        try {
+            DensityFunction compiled = Compiler.compile(original);
+            if (compiled == original || !(compiled instanceof CompiledDensityFunction)) {
+                failures.add("BlendedNoise: expected CompiledDensityFunction, got "
+                        + (compiled == null ? "null" : compiled.getClass().getName()));
+            } else {
+                Random rnd = new Random(0xB1E5EED0C0FFEEL);
+                int mismatches = 0;
+                long firstA = 0, firstB = 0;
+                for (int i = 0; i < 4096; i++) {
+                    var ctx = new DensityFunction.SinglePointContext(
+                            rnd.nextInt(8192) - 4096,
+                            rnd.nextInt(384) - 64,
+                            rnd.nextInt(8192) - 4096);
+                    double a = original.compute(ctx);
+                    double b = compiled.compute(ctx);
+                    long bitsA = Double.doubleToLongBits(a);
+                    long bitsB = Double.doubleToLongBits(b);
+                    if (bitsA != bitsB) {
+                        mismatches++;
+                        if (mismatches == 1) {
+                            firstA = bitsA;
+                            firstB = bitsB;
+                        }
+                    }
+                }
+                if (mismatches == 0) {
+                    passed++;
+                } else {
+                    failures.add("BlendedNoise: " + mismatches
+                            + " / 4096 bit mismatches (first: " + firstA + " vs " + firstB + ")");
+                }
+            }
+        } catch (Throwable t) {
+            failures.add("BlendedNoise: " + t);
+        }
+        DensityFunctionCompiler.LOGGER.info("DFC BlendedNoise parity: {}/{} passed", passed, total);
+        for (String f : failures) {
+            DensityFunctionCompiler.LOGGER.warn("  blended fail: {}", f);
         }
         return new SuiteResult(total, passed, failures);
     }

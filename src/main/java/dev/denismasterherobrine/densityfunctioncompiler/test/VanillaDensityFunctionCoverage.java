@@ -10,15 +10,14 @@ import net.minecraft.core.Registry;
 import net.minecraft.world.level.levelgen.DensityFunction;
 import net.minecraft.world.level.levelgen.DensityFunctions;
 import net.minecraft.world.level.levelgen.synth.BlendedNoise;
-
 import java.util.ArrayList;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Set;
 
 /**
- * Audits that {@link IRNode.Invoke} targets are expected (identity placeholders, blended
- * noise, unhandled vanilla helpers) rather than silent {@link IRBuilder} fallthrough of a
+ * Audits that {@link IRNode.Invoke} targets are expected (identity placeholders,
+ * unhandled vanilla helpers) rather than silent {@link IRBuilder} fallthrough of a
  * vanilla {@code DensityFunction} we forgot to case-match.
  */
 public final class VanillaDensityFunctionCoverage {
@@ -54,9 +53,6 @@ public final class VanillaDensityFunctionCoverage {
     }
 
     public static boolean isIntentionalVanillaInvoke(Class<?> c) {
-        if (c == BlendedNoise.class) {
-            return true;
-        }
         if (c == DensityFunctions.BlendAlpha.class) {
             return true;
         }

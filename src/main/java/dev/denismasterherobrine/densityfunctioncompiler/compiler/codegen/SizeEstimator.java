@@ -205,6 +205,12 @@ final class SizeEstimator {
                 int spill = isSpillCandidate(node) ? 4 : 0;
                 yield coordPrep + self + spill;
             }
+            case IRNode.InlinedBlendedNoise b -> {
+                // Unrolled 8 + 16 + 16 octave sites, 5-arg noise, null-guards, Mth.clampedLerp.
+                int self = 4500;
+                int spill = isSpillCandidate(node) ? 4 : 0;
+                yield self + spill;
+            }
             case IRNode.WeirdRarity wr -> {
                 int in = treatAllChildrenAsExtracted ? CALL_SITE_BYTES : sizeOfChild(wr.input());
                 int self = 5; // ldcInt ordinal (1-3) + INVOKESTATIC weirdRarity (3)
@@ -215,8 +221,8 @@ final class SizeEstimator {
             case IRNode.Spline.Constant sc -> 3; // LDC
             case IRNode.Spline.Multipoint mp -> sizeOfMultipoint(mp, treatAllChildrenAsExtracted);
 
-            case IRNode.Marker m -> 14; // ALOAD/GETFIELD/AALOAD + ALOAD/INVOKEINTERFACE
-            case IRNode.Invoke iv -> 14;
+            case IRNode.Marker m -> 12; // ALOAD [CHECKCAST] GETFIELD ext_i + ALOAD/INVOKEINTERFACE
+            case IRNode.Invoke iv -> 12;
             case IRNode.EndIslands e -> 14;
             case IRNode.BlendDensity bd -> {
                 int in = treatAllChildrenAsExtracted ? CALL_SITE_BYTES : sizeOfChild(bd.input());

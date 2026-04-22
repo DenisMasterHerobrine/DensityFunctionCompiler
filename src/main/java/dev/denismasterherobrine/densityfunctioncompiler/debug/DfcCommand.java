@@ -33,11 +33,13 @@ public final class DfcCommand {
                     ctx.getSource().sendSuccess(() -> Component.literal(
                             ("DFC: %d roots compiled, %d unique IR nodes, %d hidden classes alive, "
                                     + "%d helpers emitted, %d optimizer rewrite passes, "
-                                    + "%d noises inlined (%d octaves unrolled)")
+                                    + "%d noises inlined (%d octaves unrolled), "
+                                    + "%d blended roots (%d blended octaves in bytecode)")
                                     .formatted(stats.rootsCompiled(), stats.uniqueNodes(),
                                             stats.classesAlive(), stats.helpersEmitted(),
                                             stats.optimizerRewrites(),
-                                            stats.noisesInlined(), stats.octavesInlined())),
+                                            stats.noisesInlined(), stats.octavesInlined(),
+                                            stats.blendedInlined(), stats.blendedOctavesEmitted())),
                             false);
                     return 1;
                 }))
@@ -80,6 +82,14 @@ public final class DfcCommand {
                     for (String f : noise.failures()) {
                         src.sendSuccess(() -> Component.literal("  noise fail: " + f).withStyle(ChatFormatting.RED), false);
                     }
+                    var blended = ParitySelfTest.runBlendedNoiseParity();
+                    var bColor = blended.failures().isEmpty() ? ChatFormatting.GREEN : ChatFormatting.RED;
+                    src.sendSuccess(() -> Component.literal(
+                            "DFC BlendedNoise bit-parity: %d/%d cases passed".formatted(blended.passed(), blended.total()))
+                            .withStyle(bColor), false);
+                    for (String f : blended.failures()) {
+                        src.sendSuccess(() -> Component.literal("  blended fail: " + f).withStyle(ChatFormatting.RED), false);
+                    }
                     var facCov = VanillaDensityFunctionCoverage.runFactoryBattery();
                     var fc = facCov.failures().isEmpty() ? ChatFormatting.GREEN : ChatFormatting.RED;
                     src.sendSuccess(() -> Component.literal(
@@ -97,6 +107,7 @@ public final class DfcCommand {
                         src.sendSuccess(() -> Component.literal("  registry fail: " + f).withStyle(ChatFormatting.RED), false);
                     }
                     boolean allOk = arith.failures().isEmpty() && noise.failures().isEmpty()
+                            && blended.failures().isEmpty()
                             && facCov.failures().isEmpty() && regCov.failures().isEmpty();
                     return allOk ? 1 : 0;
                 }))

@@ -108,6 +108,13 @@ public sealed interface IRNode {
                         double maxValue) implements IRNode {}
 
     /**
+     * Inlined {@link net.minecraft.world.level.levelgen.synth.BlendedNoise#compute} with
+     * the vanilla 1.21.x two-loop + {@code Mth.clampedLerp} structure (5-arg
+     * {@link net.minecraft.world.level.levelgen.synth.ImprovedNoise#noise} per octave).
+     */
+    record InlinedBlendedNoise(int blendedSpecIndex, double maxValue) implements IRNode {}
+
+    /**
      * Standalone {@code WeirdScaledSampler} rarity-mapping IR node. Produced by
      * {@link NoiseExpander} as the {@code rarity} factor of the
      * {@code abs(noise(...)) * rarity(input)} decomposition; carries just enough to emit

@@ -35,6 +35,8 @@ public final class RouterPipeline {
      *  per-octave loop, so this number directly correlates with the eliminated
      *  megamorphic call-site count in the steady-state evaluator. */
     private static final AtomicLong NOISES_INLINED_TOTAL = new AtomicLong();
+    private static final AtomicLong BLENDED_NOISES_INLINED_TOTAL = new AtomicLong();
+    private static final AtomicLong BLENDED_OCTAVES_EMITTED_TOTAL = new AtomicLong();
     /** Cumulative count of individual {@code ImprovedNoise} octaves whose
      *  contribution was unrolled inline. Tracks the actual size win — a single
      *  noise with 8 active octaves contributes 8 here, while a 1-octave noise
@@ -227,13 +229,20 @@ public final class RouterPipeline {
         if (octavesUnrolled > 0) OCTAVES_INLINED_TOTAL.addAndGet(octavesUnrolled);
     }
 
+    /** Inlined {@link net.minecraft.world.level.levelgen.synth.BlendedNoise} roots. */
+    public static void recordBlendedInline(int blendedSpecialized, long blendedNonNullOctaves) {
+        if (blendedSpecialized > 0) BLENDED_NOISES_INLINED_TOTAL.addAndGet(blendedSpecialized);
+        if (blendedNonNullOctaves > 0) BLENDED_OCTAVES_EMITTED_TOTAL.addAndGet(blendedNonNullOctaves);
+    }
+
     public static void recordCompiledClassDropped() {
         CLASSES_ALIVE.decrementAndGet();
     }
 
     public record Stats(int rootsCompiled, int classesAlive, long uniqueNodes,
                          long savedByCse, long helpersEmitted, long optimizerRewrites,
-                         long noisesInlined, long octavesInlined) {}
+                         long noisesInlined, long octavesInlined,
+                         long blendedInlined, long blendedOctavesEmitted) {}
 
     public static Stats snapshotStats() {
         return new Stats(
@@ -244,6 +253,8 @@ public final class RouterPipeline {
                 HELPERS_TOTAL.get(),
                 OPT_REWRITES_TOTAL.get(),
                 NOISES_INLINED_TOTAL.get(),
-                OCTAVES_INLINED_TOTAL.get());
+                OCTAVES_INLINED_TOTAL.get(),
+                BLENDED_NOISES_INLINED_TOTAL.get(),
+                BLENDED_OCTAVES_EMITTED_TOTAL.get());
     }
 }

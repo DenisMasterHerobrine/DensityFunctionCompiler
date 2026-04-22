@@ -92,6 +92,8 @@ public final class IRPrinter {
                             + "+" + spec.second().activeOctaves().length
                             + " maxValue=" + in.maxValue();
                 }
+                case IRNode.InlinedBlendedNoise b ->
+                        "InlinedBlendedNoise#" + b.blendedSpecIndex() + " maxValue=" + b.maxValue();
                 case IRNode.WeirdRarity wr -> "WeirdRarity(mapper=" + wr.rarityValueMapperOrdinal() + ")";
                 case IRNode.EndIslands e -> "EndIslands@" + e.externIndex();
                 case IRNode.Spline.Constant sc -> "Spline.Const(" + sc.value() + ")";

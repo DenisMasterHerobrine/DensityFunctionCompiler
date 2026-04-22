@@ -1,5 +1,6 @@
 package dev.denismasterherobrine.densityfunctioncompiler.compiler.codegen;
 
+import dev.denismasterherobrine.densityfunctioncompiler.compiler.noise.BlendedNoiseSpec;
 import dev.denismasterherobrine.densityfunctioncompiler.compiler.ir.IRNode;
 import dev.denismasterherobrine.densityfunctioncompiler.compiler.ir.RefCount;
 import org.objectweb.asm.ClassWriter;
@@ -83,6 +84,7 @@ public final class Codegen {
     private static final String NORMAL_NOISE_INTERNAL = "net/minecraft/world/level/levelgen/synth/NormalNoise";
     static final String IMPROVED_NOISE_INTERNAL = "net/minecraft/world/level/levelgen/synth/ImprovedNoise";
     private static final String DENSITY_FUNCTION_INTERNAL = "net/minecraft/world/level/levelgen/DensityFunction";
+    private static final String DENSITY_FUNCTION_DESC = "L" + DENSITY_FUNCTION_INTERNAL + ";";
     private static final String FUNCTION_CONTEXT_INTERNAL =
             "net/minecraft/world/level/levelgen/DensityFunction$FunctionContext";
     private static final String METHOD_HANDLE_INTERNAL = "java/lang/invoke/MethodHandle";
@@ -91,6 +93,8 @@ public final class Codegen {
     private static final String IMPROVED_NOISE_DESC = "L" + IMPROVED_NOISE_INTERNAL + ";";
     private static final String RUNTIME_INTERNAL =
             "dev/denismasterherobrine/densityfunctioncompiler/compiler/runtime/Runtime";
+    private static final String MTH_INTERNAL = "net/minecraft/util/Mth";
+    private static final String NOISE5_DESC = "(DDDDD)D";
 
     /**
      * Constructor descriptor used both by {@link #emitConstructor} and by
@@ -157,6 +161,8 @@ public final class Codegen {
         // path can GETFIELD them by name rather than going through the inherited
         // Object[] noiseOctaves with AALOAD+CHECKCAST on every call.
         emitNoiseFields(cw, pool);
+        // ext_i copies externs[i] for fast child dispatch (avoids aaload on nested markers).
+        emitExternFields(cw, pool);
         emitConstructor(cw, classInternalName, pool);
         // Note: rebind() is implemented in the supertype using the constructor MethodHandle
         // we thread through; we deliberately do NOT emit a rebind override here because that
@@ -202,11 +208,53 @@ public final class Codegen {
                         noiseFieldName(s, 1, o), IMPROVED_NOISE_DESC, null, null).visitEnd();
             }
         }
+        int bCount = pool.blendedNoiseSpecCount();
+        for (int b = 0; b < bCount; b++) {
+            for (int o = 0; o < BlendedNoiseSpec.MAIN_OCTAVES; o++) {
+                cw.visitField(Opcodes.ACC_PRIVATE | Opcodes.ACC_FINAL,
+                        blendedFieldName(b, 0, o), IMPROVED_NOISE_DESC, null, null).visitEnd();
+            }
+            for (int o = 0; o < BlendedNoiseSpec.LIMIT_OCTAVES; o++) {
+                cw.visitField(Opcodes.ACC_PRIVATE | Opcodes.ACC_FINAL,
+                        blendedFieldName(b, 1, o), IMPROVED_NOISE_DESC, null, null).visitEnd();
+            }
+            for (int o = 0; o < BlendedNoiseSpec.LIMIT_OCTAVES; o++) {
+                cw.visitField(Opcodes.ACC_PRIVATE | Opcodes.ACC_FINAL,
+                        blendedFieldName(b, 2, o), IMPROVED_NOISE_DESC, null, null).visitEnd();
+            }
+        }
     }
 
     /** Stable per-octave field name used by both {@link #emitNoiseFields} and the codegen. */
     static String noiseFieldName(int specIdx, int branch, int activeOctaveIdx) {
         return "noise_" + specIdx + "_" + branch + "_" + activeOctaveIdx;
+    }
+
+    /**
+     * Per-octave field for {@link dev.denismasterherobrine.densityfunctioncompiler.compiler.ir.IRNode.InlinedBlendedNoise}:
+     * section {@code 0} = main 0..7, {@code 1} = min limit 0..15, {@code 2} = max limit 0..15.
+     */
+    static String blendedFieldName(int blendedSpecIdx, int section, int subIndex) {
+        String tag = section == 0 ? "m" : (section == 1 ? "a" : "b");
+        return "blnd_" + blendedSpecIdx + "_" + tag + "_" + subIndex;
+    }
+
+    /**
+     * One {@code private final} reference per {@link ConstantPool#extern(int)} index.
+     * Populated in {@link #emitConstructor} from the same {@code DensityFunction[]}
+     * passed to {@code super}; mirrors {@code externs[i]} and stays correct across
+     * {@link CompiledDensityFunction#rebind} (fresh instance, constructor re-runs).
+     */
+    static String externFieldName(int index) {
+        return "ext_" + index;
+    }
+
+    private static void emitExternFields(ClassWriter cw, ConstantPool pool) {
+        int n = pool.externCount();
+        for (int i = 0; i < n; i++) {
+            cw.visitField(Opcodes.ACC_PRIVATE | Opcodes.ACC_FINAL,
+                    externFieldName(i), DENSITY_FUNCTION_DESC, null, null).visitEnd();
+        }
     }
 
     private static void emitConstructor(ClassWriter cw, String classInternalName, ConstantPool pool) {
@@ -228,6 +276,14 @@ public final class Codegen {
         mv.visitVarInsn(Opcodes.ALOAD, 11);
         mv.visitMethodInsn(Opcodes.INVOKESPECIAL, COMPILED_BASE_INTERNAL, "<init>", CTOR_DESC, false);
 
+        for (int i = 0; i < pool.externCount(); i++) {
+            mv.visitVarInsn(Opcodes.ALOAD, 0);
+            mv.visitVarInsn(Opcodes.ALOAD, 5);
+            ldcIntStatic(mv, i);
+            mv.visitInsn(Opcodes.AALOAD);
+            mv.visitFieldInsn(Opcodes.PUTFIELD, classInternalName, externFieldName(i), DENSITY_FUNCTION_DESC);
+        }
+
         // Populate per-octave fields from the noiseOctaves[] payload. Layout matches
         // ConstantPool.finishNoiseOctaves(): per-spec, first branch then second
         // branch, active octaves only.
@@ -242,6 +298,17 @@ public final class Codegen {
             }
             for (int o = 0; o < secondCount; o++) {
                 emitOctavePutfield(mv, classInternalName, s, 1, o, cursor++);
+            }
+        }
+        for (int b = 0; b < pool.blendedNoiseSpecCount(); b++) {
+            for (int o = 0; o < BlendedNoiseSpec.MAIN_OCTAVES; o++) {
+                emitBlendedPutfield(mv, classInternalName, b, 0, o, cursor++);
+            }
+            for (int o = 0; o < BlendedNoiseSpec.LIMIT_OCTAVES; o++) {
+                emitBlendedPutfield(mv, classInternalName, b, 1, o, cursor++);
+            }
+            for (int o = 0; o < BlendedNoiseSpec.LIMIT_OCTAVES; o++) {
+                emitBlendedPutfield(mv, classInternalName, b, 2, o, cursor++);
             }
         }
 
@@ -261,6 +328,17 @@ public final class Codegen {
         mv.visitTypeInsn(Opcodes.CHECKCAST, IMPROVED_NOISE_INTERNAL);
         mv.visitFieldInsn(Opcodes.PUTFIELD, classInternalName,
                 noiseFieldName(specIdx, branch, activeOctaveIdx), IMPROVED_NOISE_DESC);
+    }
+
+    private static void emitBlendedPutfield(MethodVisitor mv, String classInternalName,
+                                        int bIdx, int section, int sub, int payloadIdx) {
+        mv.visitVarInsn(Opcodes.ALOAD, 0);
+        mv.visitVarInsn(Opcodes.ALOAD, 4);
+        ldcIntStatic(mv, payloadIdx);
+        mv.visitInsn(Opcodes.AALOAD);
+        mv.visitTypeInsn(Opcodes.CHECKCAST, IMPROVED_NOISE_INTERNAL);
+        mv.visitFieldInsn(Opcodes.PUTFIELD, classInternalName,
+                blendedFieldName(bIdx, section, sub), IMPROVED_NOISE_DESC);
     }
 
     /** Static-context twin of {@code EmitState.ldcInt} for the constructor body. */
@@ -533,6 +611,7 @@ public final class Codegen {
                 case IRNode.Shift s -> emitShift(s);
                 case IRNode.WeirdScaled w -> emitWeirdScaled(w);
                 case IRNode.InlinedNoise n -> emitInlinedNoise(n);
+                case IRNode.InlinedBlendedNoise b -> emitInlinedBlendedNoise(b);
                 case IRNode.WeirdRarity wr -> emitWeirdRarity(wr);
 
                 case IRNode.Spline.Constant sc -> emitConst(sc.value());
@@ -1142,13 +1221,18 @@ public final class Codegen {
 
         private void emitInvoke(int idx) {
             mv.visitVarInsn(Opcodes.ALOAD, 0);
-            mv.visitFieldInsn(Opcodes.GETFIELD, COMPILED_BASE_INTERNAL, "externs",
-                    "[L" + DENSITY_FUNCTION_INTERNAL + ";");
-            ldcInt(idx);
-            mv.visitInsn(Opcodes.AALOAD);
+            if (castSelfForSubclassNoiseFields) {
+                mv.visitTypeInsn(Opcodes.CHECKCAST, classInternalName);
+            }
+            mv.visitFieldInsn(Opcodes.GETFIELD, classInternalName, externFieldName(idx), DENSITY_FUNCTION_DESC);
             mv.visitVarInsn(Opcodes.ALOAD, 1);
             mv.visitMethodInsn(Opcodes.INVOKEINTERFACE, DENSITY_FUNCTION_INTERNAL,
                     "compute", "(L" + FUNCTION_CONTEXT_INTERNAL + ";)D", true);
+        }
+
+        private void emitInlinedBlendedNoise(IRNode.InlinedBlendedNoise n) {
+            BlendedNoiseByteEmitter.emit(
+                    mv, classInternalName, pool, n.blendedSpecIndex(), castSelfForSubclassNoiseFields, this::allocDoubleSlot);
         }
 
         private void emitBlendDensity(IRNode.BlendDensity bd) {
