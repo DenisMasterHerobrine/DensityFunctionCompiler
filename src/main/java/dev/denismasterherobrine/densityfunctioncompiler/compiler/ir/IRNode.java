@@ -132,6 +132,13 @@ public sealed interface IRNode {
     record EndIslands(int externIndex) implements IRNode {}
 
     /**
+     * {@link net.minecraft.world.level.levelgen.Beardifier} when
+     * {@link dev.denismasterherobrine.densityfunctioncompiler.config.DfcConfig#beardifierSpecialize()}
+     * is enabled — same runtime dispatch as {@link Invoke}, distinct IR for audits / fingerprinting.
+     */
+    record Beardifier(int externIndex) implements IRNode {}
+
+    /**
      * Inlined spline AST. Children are IR nodes (the spline's flattened coordinate / value
      * branches), with two parallel {@code float[]} arrays of locations and derivatives per
      * level interpreted by the codegen. {@code splineIndex} points at the original

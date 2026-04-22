@@ -1,0 +1,191 @@
+plugins {
+    id 'java-library'
+}
+
+java {
+    toolchain {
+        languageVersion = JavaLanguageVersion.of(21)
+    }
+}
+
+group = rootProject.group
+version = rootProject.version
+
+def nativeDir = layout.buildDirectory.dir('native').get().asFile
+def cmakeBuildDir = new File(nativeDir, 'cmake')
+def nativeArtifactsRoot = layout.buildDirectory.dir('nativeArtifacts').get().asFile
+
+def osName = System.getProperty('os.name').toLowerCase(java.util.Locale.US)
+def osArch = System.getProperty('os.arch').toLowerCase(java.util.Locale.US)
+def hostClassifier = osName.contains('windows') ? 'windows_amd64'
+        : osName.contains('mac') ? (osArch.contains('aarch64') || osArch.contains('arm64') ? 'macos_aarch64' : 'macos_x64')
+        : 'linux_x64'
+
+/** Every platform {@link dev.denismasterherobrine.dfcnatives.NativeLibraryLoader} may load. */
+def allNativeClassifiers = ['windows_amd64', 'linux_x64', 'macos_aarch64', 'macos_x64']
+
+def libFileForClassifier = { String clf ->
+    clf == 'windows_amd64' ? 'dfc_native.dll' : clf.startsWith('macos') ? 'libdfc_native.dylib' : 'libdfc_native.so'
+}
+
+/** Host prebuilt: if present, CMake is skipped and this file is staged into nativeArtifacts. */
+def hostPrebuiltFile = file("${projectDir}/prebuilts/${hostClassifier}/${libFileForClassifier(hostClassifier)}")
+
+def javaHomeProp = System.getProperty('java.home') ?: System.getenv('JAVA_HOME')
+def cmakeExtra = javaHomeProp ? ["-DJAVA_HOME=${javaHomeProp}"] : []
+
+/** Override when `cmake` is not on PATH (e.g. Windows: -Pdfc.cmake="C:/Program Files/CMake/bin/cmake.exe"). */
+def cmakeExecutable = findProperty('dfc.cmake')?.toString() ?: 'cmake'
+
+def buildNatives = findProperty('dfc.buildNatives') == 'true'
+        || System.getenv('DFC_BUILD_NATIVES') == '1'
+
+def requireAllNatives = findProperty('dfc.requireAllNatives') == 'true'
+
+tasks.register('cmakeConfigure', Exec) {
+    group = 'native'
+    description = 'Configure CMake for the host platform (Visual Studio on Windows, Ninja elsewhere).'
+    onlyIf { buildNatives && file("${projectDir}/CMakeLists.txt").exists() && !hostPrebuiltFile.exists() }
+    workingDir = projectDir
+    inputs.file('CMakeLists.txt')
+    inputs.files(fileTree('src/main/c').matching { include '**/*.c' include '**/*.h' })
+    outputs.dir(cmakeBuildDir)
+    doFirst {
+        cmakeBuildDir.mkdirs()
+    }
+    def win = org.gradle.internal.os.OperatingSystem.current().windows
+    if (win) {
+        commandLine = [cmakeExecutable, '-B', cmakeBuildDir.absolutePath, '-S', projectDir.absolutePath,
+                       '-DCMAKE_BUILD_TYPE=Release'] + cmakeExtra
+    } else {
+        commandLine = [cmakeExecutable, '-B', cmakeBuildDir.absolutePath, '-S', projectDir.absolutePath,
+                       '-G', 'Ninja',
+                       '-DCMAKE_BUILD_TYPE=Release'] + cmakeExtra
+    }
+    ignoreExitValue = false
+}
+
+tasks.register('cmakeBuild', Exec) {
+    group = 'native'
+    description = 'Build native shared library for the host platform via CMake.'
+    dependsOn cmakeConfigure
+    onlyIf { buildNatives && !hostPrebuiltFile.exists() }
+    workingDir = projectDir
+    inputs.dir('src/main/c')
+    def win = org.gradle.internal.os.OperatingSystem.current().windows
+    def outLib = win
+            ? new File(cmakeBuildDir, 'Release/dfc_native.dll')
+            : osName.contains('mac')
+            ? new File(cmakeBuildDir, 'libdfc_native.dylib')
+            : new File(cmakeBuildDir, 'libdfc_native.so')
+    outputs.files(outLib, new File(cmakeBuildDir, 'dfc_native.dll'))
+    if (win) {
+        commandLine = [cmakeExecutable, '--build', cmakeBuildDir.absolutePath, '--config', 'Release', '--parallel']
+    } else {
+        commandLine = [cmakeExecutable, '--build', cmakeBuildDir.absolutePath, '--parallel']
+    }
+}
+
+tasks.register('copyNativeArtifact') {
+    group = 'native'
+    dependsOn cmakeBuild
+    onlyIf { buildNatives }
+    doLast {
+        def classifierDir = new File(nativeArtifactsRoot, hostClassifier)
+        classifierDir.mkdirs()
+        def win = org.gradle.internal.os.OperatingSystem.current().windows
+        def winDll = new File(cmakeBuildDir, 'Release/dfc_native.dll')
+        def winDllAlt = new File(cmakeBuildDir, 'dfc_native.dll')
+        def libPath = win
+                ? (winDll.exists() ? winDll : winDllAlt)
+                : osName.contains('mac')
+                ? new File(cmakeBuildDir, 'libdfc_native.dylib')
+                : new File(cmakeBuildDir, 'libdfc_native.so')
+        def targetName = libFileForClassifier(hostClassifier)
+        def destPath = new File(classifierDir, targetName).toPath()
+        if (libPath.exists()) {
+            java.nio.file.Files.copy(libPath.toPath(), destPath, java.nio.file.StandardCopyOption.REPLACE_EXISTING)
+            return
+        }
+        if (hostPrebuiltFile.exists()) {
+            java.nio.file.Files.copy(hostPrebuiltFile.toPath(), destPath, java.nio.file.StandardCopyOption.REPLACE_EXISTING)
+            logger.lifecycle("dfc-natives: staged host ${targetName} from prebuilt ${hostPrebuiltFile}")
+            return
+        }
+        throw new GradleException(
+                "Native library not found after CMake (${libPath}) and no prebuilt at ${hostPrebuiltFile}")
+    }
+}
+
+tasks.register('copyForeignNativePrebuilts') {
+    group = 'native'
+    description = 'Copy prebuilt libs from prebuilts/<classifier>/ for non-host platforms (see prebuilts/README.txt).'
+    onlyIf { buildNatives }
+    notCompatibleWithConfigurationCache("uses project.file in copyForeignNativePrebuilts doLast")
+    doLast {
+        def preRoot = file("${projectDir}/prebuilts")
+        allNativeClassifiers.each { clf ->
+            if (clf == hostClassifier) {
+                return
+            }
+            def lib = libFileForClassifier(clf)
+            def src = file("${preRoot}/${clf}/${lib}")
+            if (!src.exists()) {
+                logger.lifecycle("dfc-natives: no prebuilt for ${clf} (expected ${src})")
+                return
+            }
+            def destDir = new File(nativeArtifactsRoot, clf)
+            destDir.mkdirs()
+            java.nio.file.Files.copy(src.toPath(), new File(destDir, lib).toPath(),
+                    java.nio.file.StandardCopyOption.REPLACE_EXISTING)
+            logger.lifecycle("dfc-natives: staged prebuilt ${clf} from ${src}")
+        }
+    }
+}
+
+tasks.register('assembleUniversalNatives') {
+    group = 'native'
+    description = 'Host CMake output + foreign prebuilts → build/nativeArtifacts/* (all platforms to ship).'
+    dependsOn copyNativeArtifact, copyForeignNativePrebuilts
+    onlyIf { buildNatives }
+    doLast {
+        if (requireAllNatives) {
+            allNativeClassifiers.each { clf ->
+                def lib = libFileForClassifier(clf)
+                def f = new File(nativeArtifactsRoot, "${clf}/${lib}")
+                if (!f.exists()) {
+                    throw new GradleException(
+                            "dfc.requireAllNatives: missing ${clf} (${f}). Build on that OS or add prebuilts/${clf}/${lib}")
+                }
+            }
+        }
+        logger.lifecycle("dfc-natives: universal bundle at ${nativeArtifactsRoot}")
+        allNativeClassifiers.each { clf ->
+            def lib = libFileForClassifier(clf)
+            def f = new File(nativeArtifactsRoot, "${clf}/${lib}")
+            logger.lifecycle("  [${clf}] ${f.exists() ? 'OK ' + lib : '— (not bundled)'}")
+        }
+    }
+}
+
+tasks.named('processResources', ProcessResources) {
+    if (buildNatives) {
+        dependsOn assembleUniversalNatives
+        from(layout.buildDirectory.dir('nativeArtifacts')) {
+            into 'META-INF/natives'
+        }
+    }
+    duplicatesStrategy = DuplicatesStrategy.INCLUDE
+}
+
+tasks.named('jar', Jar) {
+    if (buildNatives) {
+        dependsOn assembleUniversalNatives
+    }
+    manifest {
+        attributes(
+                'FMLModType': 'LIBRARY',
+                'Automatic-Module-Name': 'dev.denismasterherobrine.dfcnatives'
+        )
+    }
+}

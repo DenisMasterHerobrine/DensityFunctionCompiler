@@ -12,38 +12,24 @@ import java.util.Random;
 /**
  * Probe + smoke test for {@link DfcVectorSupport} (Tier B7).
  *
- * <p>The "vector vs scalar" parity check the plan calls for is intentionally
- * hard to express in-process: the codegen flag {@link DfcVectorSupport#AVAILABLE}
- * is read once at class init from the system property and the underlying
- * {@code jdk.incubator.vector} module is loaded (or not) at JVM start. Toggling
- * that mid-process would require reloading the entire codegen subsystem with a
- * different class loader — not worth the complexity for what is fundamentally a
- * codegen flag check.
+ * <p>Vector vs scalar parity across JVM launches is a two-process check: {@link
+ * DfcVectorSupport#AVAILABLE} is fixed at class init from whether {@code jdk.incubator.vector}
+ * is on the module path. {@link dev.denismasterherobrine.densityfunctioncompiler.compiler.cache.CompilationFingerprint}
+ * bakes that into the global class-cache key so scalar and vector launchers never share hidden classes.
  *
  * <p>What we do instead:
  *
  * <ol>
- *   <li><strong>Probe stability.</strong> {@link DfcVectorSupport#AVAILABLE}
- *       and {@link DfcVectorSupport#PREFERRED_LANES} must agree with the
- *       {@code -Ddfc.vector} system property (modulo the environment's
- *       {@code --add-modules} state, which we can't introspect cleanly). The
- *       probe must never crash regardless of module state.</li>
+ *   <li><strong>Probe stability.</strong> Reading {@link DfcVectorSupport#AVAILABLE}
+ *       and {@link DfcVectorSupport#PREFERRED_LANES} must never crash regardless of module state.</li>
  *   <li><strong>Lane count sanity.</strong> If {@link DfcVectorSupport#AVAILABLE}
  *       is true, {@link DfcVectorSupport#PREFERRED_LANES} must be a power of
  *       two between 2 and 16 inclusive — covering AVX2 (4), AVX-512 (8), and
  *       hypothetical AVX-1024 (16). Other values mean the species probe got
  *       garbage.</li>
- *   <li><strong>Codegen smoke.</strong> Compile a non-trivial DF that would
- *       benefit from vectorization (a polynomial chain of arithmetic) and
- *       verify the compiled output computes consistently. This catches any
- *       case where our SIMD codegen path fires when {@code AVAILABLE=true}
- *       but produces nonsense bytecode that still loads.</li>
+ *   <li><strong>Codegen smoke.</strong> Compile a small arithmetic DF and verify {@code compute}
+ *       stays bit-identical; lattice / native slab paths add SIMD only when {@code AVAILABLE} at codegen time.</li>
  * </ol>
- *
- * <p>When the codegen begins emitting actual SIMD bytecode (Tier B7's full
- * implementation; this mod ships with the probe + scalar fallback only), this
- * test will be extended with a true bit-parity sweep across {@code -Ddfc.vector=on}
- * vs {@code off} via a parallel test process.
  */
 public final class VectorParityTest {
 

@@ -42,14 +42,12 @@ neoForge {
             //   ./gradlew runClient -Ddfc.parity=true
             // or temporarily uncomment:
             // systemProperty 'dfc.parity', 'true'
-            
         }
 
         // DFC vector API (jdk.incubator.vector). Use: ./gradlew runClientVector
         clientVector {
             client()
             systemProperty 'neoforge.enabledGameTestNamespaces', project.mod_id
-            systemProperty 'dfc.vector', 'on'
             jvmArgument '--add-modules=jdk.incubator.vector'
         }
 
@@ -125,6 +123,12 @@ sourceSets.main.resources { srcDir 'src/generated/resources' }
 
 
 dependencies {
+    implementation project(':dfc-natives')
+    // Ship dfc-natives as Jar-in-Jar (FML embeds it); keep implementation for compile + IDE runs.
+    jarJar project(':dfc-natives')
+    // 1.21.1 dev runs: JiJ libraries need explicit runtime classpath unless they are mods / FMLModType LIBRARY in manifest.
+    additionalRuntimeClasspath project(':dfc-natives')
+
     // MixinSquared: @TargetHandler and related AP; runtime via JiJ (mixinsquared-neoforge)
     def ms = findProperty('mixinsquared_version') ?: '0.3.7-beta.1'
     compileOnly "com.github.bawnorton.mixinsquared:mixinsquared-common:${ms}"
@@ -145,6 +149,31 @@ dependencies {
     compileOnly "org.ow2.asm:asm:${asmVersion}"
     compileOnly "org.ow2.asm:asm-tree:${asmVersion}"
     compileOnly "org.ow2.asm:asm-util:${asmVersion}"
+}
+
+tasks.named('jar', Jar) {
+    dependsOn project(':dfc-natives').tasks.named('jar')
+}
+
+// NeoForge run configs must see an up-to-date dfc-natives jar (with META-INF/natives) on the classpath.
+gradle.projectsEvaluated {
+    def nativesJar = rootProject.project(':dfc-natives').tasks.named('jar')
+    ['runClient', 'runServer', 'runClientVector', 'prepareRunClient', 'prepareRunServer'].each { tn ->
+        def t = rootProject.tasks.findByName(tn)
+        if (t != null) {
+            t.dependsOn nativesJar
+        }
+    }
+}
+
+/**
+ * One-shot build: universal native bundle (host CMake + prebuilts under :dfc-natives/prebuilts) and mod jar with JiJ.
+ * Use: -Pdfc.buildNatives=true and optionally -Pdfc.requireAllNatives=true for release builds.
+ */
+tasks.register('dfcBuildWithNatives') {
+    group = 'build'
+    description = 'Build :dfc-natives (universal META-INF/natives) and the main mod jar (dfc-natives Jar-in-Jar).'
+    dependsOn 'jar'
 }
 
 // This block of code expands all declared replace properties in the specified resource targets.

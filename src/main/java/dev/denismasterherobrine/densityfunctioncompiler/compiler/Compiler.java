@@ -10,13 +10,18 @@ import dev.denismasterherobrine.densityfunctioncompiler.compiler.codegen.HiddenC
 import dev.denismasterherobrine.densityfunctioncompiler.compiler.codegen.Splitter;
 import dev.denismasterherobrine.densityfunctioncompiler.compiler.ir.Bounds;
 import dev.denismasterherobrine.densityfunctioncompiler.compiler.ir.IRBuilder;
+import dev.denismasterherobrine.densityfunctioncompiler.compiler.ir.CellLatticeOption;
 import dev.denismasterherobrine.densityfunctioncompiler.compiler.ir.IRNode;
 import dev.denismasterherobrine.densityfunctioncompiler.compiler.ir.IROptimizer;
 import dev.denismasterherobrine.densityfunctioncompiler.compiler.ir.NoiseExpander;
 import dev.denismasterherobrine.densityfunctioncompiler.compiler.ir.RefCount;
+import dev.denismasterherobrine.densityfunctioncompiler.compiler.ir.SlabInnerNativeProgram;
+import dev.denismasterherobrine.densityfunctioncompiler.compiler.ir.SlabNativeBatchPlan;
 import dev.denismasterherobrine.densityfunctioncompiler.compiler.noise.BlendedNoiseSpec;
 import dev.denismasterherobrine.densityfunctioncompiler.compiler.pipeline.CompilingVisitor;
 import dev.denismasterherobrine.densityfunctioncompiler.compiler.pipeline.RouterPipeline;
+import dev.denismasterherobrine.densityfunctioncompiler.natives.CodegenNativeNoise;
+import dev.denismasterherobrine.densityfunctioncompiler.natives.NativeNoiseRegistry;
 import net.minecraft.world.level.levelgen.DensityFunction;
 import net.minecraft.world.level.levelgen.synth.NormalNoise;
 
@@ -147,13 +152,17 @@ public final class Compiler {
                             double[].class, NormalNoise[].class, Object[].class, Object[].class,
                             DensityFunction[].class,
                             double.class, double.class,
-                            MethodHandle[].class, MethodHandle.class);
+                            MethodHandle[].class, long[].class,
+                            byte[].class, double[].class,
+                            MethodHandle.class);
                     ctorMH = lookup.findConstructor(cls, ctorType)
                             .asType(MethodType.methodType(CompiledDensityFunction.class,
                                     double[].class, NormalNoise[].class, Object[].class, Object[].class,
                                     DensityFunction[].class,
                                     double.class, double.class,
-                                    MethodHandle[].class, MethodHandle.class));
+                                    MethodHandle[].class, long[].class,
+                                    byte[].class, double[].class,
+                                    MethodHandle.class));
                 } catch (NoSuchMethodException | IllegalAccessException e) {
                     throw new RuntimeException("Failed to resolve constructor MethodHandle for "
                             + fClassName, e);
@@ -162,8 +171,8 @@ public final class Compiler {
                 return new GlobalCompileCache.CopiedClassBundle(
                         fClassName, cls, bytecode, ctorMH, helperHandles, helpersEmitted, latticeEmitted);
             });
-            return linkAndRecord(lo.bundle(), lo.reused(), root, rc, pool, minVal, maxVal, uniqueNodes, cseSavings,
-                    optimizerRewrites, noisesSpecialized, octavesUnrolled);
+            return linkAndRecord(lo.bundle(), lo.reused(), root, rc, pool, extracted, minVal, maxVal, uniqueNodes,
+                    cseSavings, optimizerRewrites, noisesSpecialized, octavesUnrolled);
         } catch (Throwable t) {
             DensityFunctionCompiler.LOGGER.warn(
                     "Compilation failed for {} ({}): {} — falling back to vanilla evaluator",
@@ -180,6 +189,7 @@ public final class Compiler {
             IRNode root,
             RefCount.Result rc,
             ConstantPool pool,
+            Set<IRNode> extracted,
             double minVal,
             double maxVal,
             int uniqueNodes,
@@ -189,6 +199,24 @@ public final class Compiler {
             int octavesUnrolled) {
         MethodHandle ctorMH = bundle.constructorHandle();
         MethodHandle[] helperHandles = bundle.helperHandles();
+        long[] nativeHandles = NativeNoiseRegistry.buildHandles(pool.noiseSpecs(), pool.blendedNoiseSpecsList());
+        byte[] slabBc = null;
+        double[] slabC = null;
+        if (bundle.latticeEmitted()) {
+            var planOpt = CellLatticeOption.analyze(root);
+            if (planOpt.isPresent() && CodegenNativeNoise.emitNativeOps()) {
+                var plan = planOpt.get();
+                var slabPlan = SlabNativeBatchPlan.analyze(root, plan, pool.noiseSpecCount(), pool.blendedNoiseSpecCount())
+                        .orElse(null);
+                if (slabPlan != null) {
+                    var opt = SlabInnerNativeProgram.tryCompile(root, plan, slabPlan, extracted);
+                    if (opt.isPresent()) {
+                        slabBc = opt.get().bytecode();
+                        slabC = opt.get().constants();
+                    }
+                }
+            }
+        }
         CompiledDensityFunction compiled;
         try {
             compiled = (CompiledDensityFunction) ctorMH.invokeExact(
@@ -198,7 +226,8 @@ public final class Compiler {
                     pool.finishNoiseOctaves(),
                     pool.finishExterns(),
                     minVal, maxVal,
-                    helperHandles, ctorMH);
+                    helperHandles, nativeHandles,
+                    slabBc, slabC, ctorMH);
         } catch (Throwable t) {
             throw new RuntimeException("Failed to instantiate " + bundle.classInternalName(), t);
         }

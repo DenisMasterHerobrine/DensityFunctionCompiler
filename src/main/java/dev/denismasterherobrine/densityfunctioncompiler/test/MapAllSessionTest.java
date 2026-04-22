@@ -101,7 +101,7 @@ public final class MapAllSessionTest {
     /**
      * Two back-to-back {@code mapAll} calls on the same compiled DF, sharing a
      * single {@link MapAllSession}, must return the same rebound result. This
-     * exercises {@code session.compiledMemo}.
+     * exercises {@code session.mapAllMemo}.
      */
     private static void verifyWithinCallMemoization() {
         DensityFunction inner = DensityFunctions.constant(2.0);
@@ -192,7 +192,7 @@ public final class MapAllSessionTest {
         }
 
         // SCENARIO B — with shared session (the NoiseChunkSessionMixin contract): one
-        // MapAllSession threaded through both calls. The session's compiledMemo
+        // MapAllSession threaded through both calls. The session's mapAllMemo
         // collapses repeat queries on the same compiled DF, but the visitor still
         // observes the marker once per *unique* compiled root with the shared inner.
         // Critically: a third call on the SAME compiled DF inside the same session
@@ -203,7 +203,7 @@ public final class MapAllSessionTest {
         DensityFunction shB = compiledRight.mapAll(shared);
         DensityFunction shA2 = compiledLeft.mapAll(shared);
         if (shA != shA2) {
-            throw new AssertionError("session.compiledMemo should make the second mapAll return "
+            throw new AssertionError("session.mapAllMemo should make the second mapAll return "
                     + "the same instance, got " + shA + " vs " + shA2);
         }
         if (shA == compiledLeft || shB == compiledRight) {

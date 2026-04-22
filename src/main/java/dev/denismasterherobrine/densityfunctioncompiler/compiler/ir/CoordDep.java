@@ -105,7 +105,7 @@ public final class CoordDep {
         // hoist a Y-only lattice subtree above a marker that, post-NoiseChunk
         // wrap, depends on (x, y, z) cell-cache state.
         if (n instanceof IRNode.Marker || n instanceof IRNode.Invoke
-                || n instanceof IRNode.EndIslands) {
+                || n instanceof IRNode.EndIslands || n instanceof IRNode.Beardifier) {
             return ALL;
         }
         return ofChildren(n, done);

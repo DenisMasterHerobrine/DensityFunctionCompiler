@@ -1,5 +1,6 @@
 package dev.denismasterherobrine.densityfunctioncompiler.compiler.cache;
 
+import dev.denismasterherobrine.densityfunctioncompiler.compiler.vector.DfcVectorSupport;
 import dev.denismasterherobrine.densityfunctioncompiler.compiler.codegen.ConstantPool;
 import dev.denismasterherobrine.densityfunctioncompiler.compiler.ir.IRNode;
 import dev.denismasterherobrine.densityfunctioncompiler.compiler.ir.RefCount;
@@ -43,7 +44,20 @@ public final class CompilationFingerprint {
         }
         hashIrStructure(root, pool, sha);
         hashPoolBindings(pool, minValue, maxValue, sha);
+        hashCodegenCapabilities(sha);
         return sha.digest();
+    }
+
+    /**
+     * Embeds JVM-wide codegen capabilities so scalar and vector hidden classes never
+     * share a {@link GlobalCompileCache} key (e.g. moving from a non-vector to a
+     * vector launcher must miss cache and re-emit).
+     */
+    private static void hashCodegenCapabilities(MessageDigest d) {
+        d.update((byte) 0xC0);
+        d.update((byte) 1);
+        d.update((byte) (DfcVectorSupport.AVAILABLE ? 1 : 0));
+        putU32(d, DfcVectorSupport.AVAILABLE ? DfcVectorSupport.PREFERRED_LANES : 0);
     }
 
     public static String stableClassSuffix(byte[] sha256) {
@@ -123,6 +137,7 @@ public final class CompilationFingerprint {
             d.update(shaFloatArrayDigest(mp.locations(), mp.derivatives())); return; }
         if (n instanceof IRNode.Marker m) { putTag(d, 21); putU32(d, m.externIndex()); return; }
         if (n instanceof IRNode.Invoke in) { putTag(d, 22); putU32(d, in.externIndex()); return; }
+        if (n instanceof IRNode.Beardifier b) { putTag(d, 26); putU32(d, b.externIndex()); return; }
         if (n instanceof IRNode.BlendDensity) { putTag(d, 23); return; }
         throw new IllegalStateException("Unhandled IR node for fingerprint: " + n);
     }

@@ -96,6 +96,10 @@ public final class Bounds {
                 var df = pool.extern(iv.externIndex());
                 yield new double[]{df.minValue(), df.maxValue()};
             }
+            case IRNode.Beardifier b -> {
+                var df = pool.extern(b.externIndex());
+                yield new double[]{df.minValue(), df.maxValue()};
+            }
             case IRNode.BlendDensity bd ->
                     new double[]{Double.NEGATIVE_INFINITY, Double.POSITIVE_INFINITY};
         };

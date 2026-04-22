@@ -4,6 +4,7 @@ import com.mojang.logging.LogUtils;
 import dev.denismasterherobrine.densityfunctioncompiler.compiler.pipeline.RegistryWarmer;
 import dev.denismasterherobrine.densityfunctioncompiler.config.DfcConfig;
 import dev.denismasterherobrine.densityfunctioncompiler.compiler.vector.DfcVectorSupport;
+import dev.denismasterherobrine.dfcnatives.DfcNativeBridge;
 import dev.denismasterherobrine.densityfunctioncompiler.debug.DfcCommand;
 import net.neoforged.fml.config.ModConfig;
 import net.minecraft.server.MinecraftServer;
@@ -28,6 +29,19 @@ public class DensityFunctionCompiler {
         container.registerConfig(ModConfig.Type.COMMON, DfcConfig.COMMON_SPEC, MODID + "-common.toml");
         LOGGER.info("DensityFunctionCompiler initialising — runtime DF JIT pipeline enabling.");
         DfcVectorSupport.logStatusOnce();
+        LOGGER.info("DFC native noise: libraryLoaded={}, avx2={}",
+                DfcNativeBridge.isAvailable(), DfcNativeBridge.hasAvx2());
+        if (!DfcNativeBridge.isAvailable()) {
+            Throwable err = DfcNativeBridge.nativeLoadError();
+            if (err != null) {
+                LOGGER.warn("DFC native noise: not loaded ({})", err.getMessage());
+            } else {
+                LOGGER.warn(
+                        "DFC native noise: not loaded (unknown reason). Build with dfc.buildNatives=true (see "
+                                + "gradle.properties), or put dfc-natives/prebuilts/<platform>/… in the repo, "
+                                + "or set env DFC_NATIVE_LIBRARY to the absolute path of dfc_native.dll / .so / .dylib.");
+            }
+        }
         var bus = NeoForge.EVENT_BUS;
         bus.addListener(DensityFunctionCompiler::onRegisterCommands);
         bus.addListener(DensityFunctionCompiler::onServerStarting);

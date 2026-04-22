@@ -53,23 +53,24 @@ import java.util.IdentityHashMap;
  *
  * <p>{@link #apply} forwards to the user visitor without memoization: the user
  * (typically {@code NoiseChunk::wrap}) has its own dedup HashMap and may legitimately
- * have side effects we shouldn't suppress. Our memoization caches only the
- * {@link CompiledDensityFunction#mapAll} return value, which is idempotent given a
- * stable visitor.
+ * have side effects we shouldn't suppress. Our memoization caches only full
+ * {@code mapAll} results ({@link #mapAllMemo}), which is idempotent given a stable
+ * visitor.
  */
 public final class MapAllSession implements DensityFunction.Visitor {
 
     private final DensityFunction.Visitor user;
 
     /**
-     * Identity-keyed cache of {@code compiledDF.mapAll(this)} return values for the
-     * duration of this session. Keys are {@link CompiledDensityFunction} instances —
-     * two compiled DFs with identical IR but different identities are intentionally
-     * treated as distinct: they live in separate slots of the externs array and
-     * carry separately-bound noise samplers, so the rebind they produce must
-     * also be distinct.
+     * Identity-keyed cache of {@code densityFunction.mapAll(this)} results for the
+     * duration of this session. Keys include vanilla nodes (shared {@code BlendDensity},
+     * router subgraph roots, etc.) and {@link CompiledDensityFunction} instances.
+     *
+     * <p>Without this, every compiled extern slot that references the same vanilla
+     * subgraph by identity would run a full {@code DensityFunctions.*.mapAll} walk
+     * again — {@code init_biomes} does that hundreds of times per router.
      */
-    final IdentityHashMap<CompiledDensityFunction, DensityFunction> compiledMemo =
+    final IdentityHashMap<DensityFunction, DensityFunction> mapAllMemo =
             new IdentityHashMap<>();
 
     public MapAllSession(DensityFunction.Visitor user) {

@@ -10,6 +10,8 @@ import dev.denismasterherobrine.densityfunctioncompiler.test.CoordDepTest;
 import dev.denismasterherobrine.densityfunctioncompiler.test.GlobalClassCacheTest;
 import dev.denismasterherobrine.densityfunctioncompiler.test.LatticePlanTest;
 import dev.denismasterherobrine.densityfunctioncompiler.test.MapAllSessionTest;
+import dev.denismasterherobrine.densityfunctioncompiler.test.NativeNoiseParityTest;
+import dev.denismasterherobrine.densityfunctioncompiler.test.SlabBatchParityTest;
 import dev.denismasterherobrine.densityfunctioncompiler.test.ParitySelfTest;
 import dev.denismasterherobrine.densityfunctioncompiler.test.VanillaDensityFunctionCoverage;
 import dev.denismasterherobrine.densityfunctioncompiler.test.VectorParityTest;
@@ -103,9 +105,11 @@ public final class DfcCommand {
                         DfcRuntimeHelpersTest.verify();
                         LatticePlanTest.verify();
                         VectorParityTest.verify();
+                        NativeNoiseParityTest.verify();
+                        SlabBatchParityTest.verify();
                         ctx.getSource().sendSuccess(
                                 () -> Component.literal("DFC: global class cache + CoordDep + MapAllSession "
-                                        + "+ runtime helpers + LatticePlan + VectorParity: OK"), false);
+                                        + "+ runtime helpers + LatticePlan + VectorParity + NativeNoise: OK"), false);
                     } catch (Throwable t) {
                         DensityFunctionCompiler.LOGGER.error("DFC cachetest failed", t);
                         ctx.getSource().sendFailure(Component.literal("cachetest: " + t.getMessage()));

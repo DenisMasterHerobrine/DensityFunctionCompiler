@@ -45,6 +45,7 @@ public final class IrTreeSupport {
             }
             case IRNode.Marker m -> List.of();
             case IRNode.Invoke iv -> List.of();
+            case IRNode.Beardifier b -> List.of();
             case IRNode.BlendDensity bd -> List.of(bd.input());
         };
     }

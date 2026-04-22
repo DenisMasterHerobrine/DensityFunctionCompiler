@@ -27,4 +27,19 @@ public final class DfcCacheFastPath {
         }
         return CACHE_MISS;
     }
+
+    /**
+     * Marker call sites flagged at compile time for NoiseChunk cache wrappers: try
+     * {@link DfcCellCacheAccess#dfc$tryDirectRead} before {@link DensityFunction#compute}.
+     */
+    public static double computeWithOptionalDirectRead(
+            DensityFunction extern, DensityFunction.FunctionContext context) {
+        if (DfcConfig.cacheWrapperDirectRead() && extern instanceof DfcCellCacheAccess acc) {
+            double v = acc.dfc$tryDirectRead(context);
+            if (Double.doubleToRawLongBits(v) != MISS_BITS) {
+                return v;
+            }
+        }
+        return extern.compute(context);
+    }
 }

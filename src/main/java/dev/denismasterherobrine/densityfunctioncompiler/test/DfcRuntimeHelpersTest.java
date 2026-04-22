@@ -23,6 +23,7 @@ public final class DfcRuntimeHelpersTest {
                 != DfcCacheFastPath.MISS_BITS) {
             throw new AssertionError("tryWrapperDirectRead must miss for a plain constant pool extern");
         }
-        DensityFunctionCompiler.LOGGER.info("DFC runtime helpers (cache miss NaN, wrapper try): OK");
+        CacheFastPathTest.run();
+        DensityFunctionCompiler.LOGGER.info("DFC runtime helpers (cache miss NaN, wrapper try, direct read): OK");
     }
 }

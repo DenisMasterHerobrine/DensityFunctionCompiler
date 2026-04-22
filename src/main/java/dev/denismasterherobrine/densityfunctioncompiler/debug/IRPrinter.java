@@ -102,6 +102,8 @@ public final class IRPrinter {
                         + " (" + pool.extern(m.externIndex()).getClass().getSimpleName() + ")";
                 case IRNode.Invoke iv -> "Invoke@" + iv.externIndex()
                         + " (" + pool.extern(iv.externIndex()).getClass().getSimpleName() + ")";
+                case IRNode.Beardifier b -> "Beardifier@" + b.externIndex()
+                        + " (" + pool.extern(b.externIndex()).getClass().getSimpleName() + ")";
                 case IRNode.BlendDensity bd -> "BlendDensity";
             };
         }

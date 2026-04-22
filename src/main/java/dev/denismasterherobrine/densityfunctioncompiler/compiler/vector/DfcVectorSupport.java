@@ -26,22 +26,12 @@ import java.lang.invoke.MethodType;
  * When unavailable, the scalar {@code fillArray} path stays in effect and worldgen
  * remains correct (just non-SIMD).
  *
- * <h2>Tri-state opt-in</h2>
+ * <h2>Availability</h2>
  *
- * <p>{@code -Ddfc.vector=auto|on|off}, default {@code auto}:
- *
- * <ul>
- *   <li>{@code off} — {@link #AVAILABLE} is {@code false} regardless of module
- *       availability. Use this if you want to A/B-test SIMD vs. scalar without
- *       touching launcher flags.</li>
- *   <li>{@code on} — explicit "use the vector API"; we still probe and only flip
- *       on if the module loaded. Logged as {@code "vector requested but module
- *       unavailable"} when the user set this but {@code --add-modules} is missing.</li>
- *   <li>{@code auto} — silent probe; on success {@link #AVAILABLE} is {@code true}
- *       and {@link #PREFERRED_LANES} is the species's lane count. On failure we
- *       stay scalar and don't log (a vanilla launcher should not see "missing
- *       module" warnings).</li>
- * </ul>
+ * <p>We probe {@code jdk.incubator.vector} once at class init. With a default
+ * launcher (no {@code --add-modules}) the module is absent and {@link #AVAILABLE}
+ * stays {@code false}. Use run config {@code clientVector} (adds the module) to
+ * enable SIMD codegen in dev.
  *
  * <h2>Codegen contract</h2>
  *
@@ -87,8 +77,7 @@ public final class DfcVectorSupport {
     public static final String VECTOR_SPECIES_INTERNAL = "jdk/incubator/vector/VectorSpecies";
 
     /**
-     * {@code true} when the {@code jdk.incubator.vector} module is on the boot
-     * module path AND the user did not opt out via {@code -Ddfc.vector=off}.
+     * {@code true} when the {@code jdk.incubator.vector} module is loadable.
      * Read once at class init; never changes for the lifetime of the JVM.
      */
     public static final boolean AVAILABLE;
@@ -113,43 +102,34 @@ public final class DfcVectorSupport {
         int lanes = 0;
         MethodHandle species = null;
 
-        String policy = System.getProperty("dfc.vector", "auto").toLowerCase(java.util.Locale.ROOT);
-        if (!"off".equals(policy)) {
-            try {
-                Class<?> doubleVector = Class.forName(
-                        "jdk.incubator.vector.DoubleVector", false,
-                        DfcVectorSupport.class.getClassLoader());
-                Class<?> vectorSpecies = Class.forName(
-                        "jdk.incubator.vector.VectorSpecies", false,
-                        DfcVectorSupport.class.getClassLoader());
+        try {
+            Class<?> doubleVector = Class.forName(
+                    "jdk.incubator.vector.DoubleVector", false,
+                    DfcVectorSupport.class.getClassLoader());
+            Class<?> vectorSpecies = Class.forName(
+                    "jdk.incubator.vector.VectorSpecies", false,
+                    DfcVectorSupport.class.getClassLoader());
 
-                MethodHandles.Lookup lookup = MethodHandles.publicLookup();
+            MethodHandles.Lookup lookup = MethodHandles.publicLookup();
 
-                // VectorSpecies SPECIES_PREFERRED is a public static final field on DoubleVector.
-                MethodHandle speciesGetter = lookup.findStaticGetter(
-                        doubleVector, "SPECIES_PREFERRED", vectorSpecies);
-                Object speciesInstance = speciesGetter.invoke();
+            MethodHandle speciesGetter = lookup.findStaticGetter(
+                    doubleVector, "SPECIES_PREFERRED", vectorSpecies);
+            Object speciesInstance = speciesGetter.invoke();
 
-                MethodHandle lengthMH = lookup.findVirtual(
-                        vectorSpecies, "length", MethodType.methodType(int.class));
-                lanes = (int) lengthMH.invoke(speciesInstance);
+            MethodHandle lengthMH = lookup.findVirtual(
+                    vectorSpecies, "length", MethodType.methodType(int.class));
+            lanes = (int) lengthMH.invoke(speciesInstance);
 
-                if (lanes > 0) {
-                    available = true;
-                    species = speciesGetter;
-                }
-            } catch (ClassNotFoundException cnfe) {
-                if ("on".equals(policy)) {
-                    DensityFunctionCompiler.LOGGER.warn(
-                            "DFC vector: -Ddfc.vector=on requested but jdk.incubator.vector "
-                                    + "is not on the module path; pass --add-modules "
-                                    + "jdk.incubator.vector to enable. Falling back to scalar.");
-                }
-            } catch (Throwable t) {
-                DensityFunctionCompiler.LOGGER.warn(
-                        "DFC vector: probe failed unexpectedly ({}); falling back to scalar.",
-                        t.toString());
+            if (lanes > 0) {
+                available = true;
+                species = speciesGetter;
             }
+        } catch (ClassNotFoundException ignored) {
+            // Default JVM: incubator vector not on module path — stay scalar, no warning.
+        } catch (Throwable t) {
+            DensityFunctionCompiler.LOGGER.warn(
+                    "DFC vector: probe failed unexpectedly ({}); falling back to scalar.",
+                    t.toString());
         }
 
         AVAILABLE = available;
@@ -170,7 +150,7 @@ public final class DfcVectorSupport {
                     PREFERRED_LANES);
         } else {
             DensityFunctionCompiler.LOGGER.info(
-                    "DFC vector: disabled (jdk.incubator.vector unavailable or -Ddfc.vector=off)");
+                    "DFC vector: disabled (jdk.incubator.vector not on module path; use --add-modules jdk.incubator.vector to enable)");
         }
     }
 

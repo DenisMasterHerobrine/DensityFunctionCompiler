@@ -77,6 +77,21 @@ public abstract class CompiledDensityFunction implements DensityFunction {
     protected final MethodHandle[] helperHandles;
 
     /**
+     * Opaque JNI pointers ({@code dfc-natives}): indices {@code 0 .. noiseSpecCount-1} are
+     * NormalNoise stacks; following entries are blended specs. Zero means use the Java octave path.
+     */
+    protected final long[] nativeNoiseHandles;
+
+    /**
+     * Optional lattice-inner postfix program for native slab evaluation ({@code dfc-natives} VM);
+     * {@code null} when the subgraph is unsupported or slab batching is inactive.
+     */
+    protected final byte[] slabInnerProgram;
+
+    /** Constant pool for {@link #slabInnerProgram}; empty array when the program is {@code null}. */
+    protected final double[] slabInnerConsts;
+
+    /**
      * MethodHandle bound to the generated subclass's constructor, used by
      * {@link #rebind(NormalNoise[], DensityFunction[])} to allocate fresh
      * instances when {@link #mapAll(DensityFunction.Visitor)} produces remapped
@@ -85,7 +100,7 @@ public abstract class CompiledDensityFunction implements DensityFunction {
      *
      * <p>Has the post-{@code asType} signature
      * {@code (double[], NormalNoise[], Object[], Object[], DensityFunction[],
-     * double, double, MethodHandle[], MethodHandle) -> CompiledDensityFunction},
+     * double, double, MethodHandle[], long[], MethodHandle) -> CompiledDensityFunction},
      * so {@code invokeExact} just works without further boxing or casting. The
      * trailing {@code MethodHandle} arg is the constructor MH itself, threaded
      * through so the new instance can rebind again later.
@@ -125,6 +140,9 @@ public abstract class CompiledDensityFunction implements DensityFunction {
             double minValue,
             double maxValue,
             MethodHandle[] helperHandles,
+            long[] nativeNoiseHandles,
+            byte[] slabInnerProgram,
+            double[] slabInnerConsts,
             MethodHandle constructorMH) {
         this.constants = constants;
         this.noises = noises;
@@ -134,6 +152,9 @@ public abstract class CompiledDensityFunction implements DensityFunction {
         this.minValue = minValue;
         this.maxValue = maxValue;
         this.helperHandles = helperHandles;
+        this.nativeNoiseHandles = nativeNoiseHandles;
+        this.slabInnerProgram = slabInnerProgram;
+        this.slabInnerConsts = slabInnerConsts != null ? slabInnerConsts : new double[0];
         this.constructorMH = constructorMH;
     }
 
@@ -205,7 +226,8 @@ public abstract class CompiledDensityFunction implements DensityFunction {
         try {
             return (CompiledDensityFunction) constructorMH.invokeExact(
                     constants, visitedNoises, splines, noiseOctaves, visitedExterns,
-                    minValue, maxValue, helperHandles, constructorMH);
+                    minValue, maxValue, helperHandles, nativeNoiseHandles,
+                    slabInnerProgram, slabInnerConsts, constructorMH);
         } catch (Throwable t) {
             throw new RuntimeException(
                     "CompiledDensityFunction.rebind failed for "
@@ -229,7 +251,9 @@ public abstract class CompiledDensityFunction implements DensityFunction {
      *       memo and return the same rebound instance — which is precisely what
      *       {@code NoiseChunk}'s record-equality dedup of {@code wrapped()}
      *       requires to collapse all duplicate {@code FlatCache}/{@code NoiseInterpolator}
-     *       allocations into one.</li>
+     *       allocations into one. The same map also keys vanilla subgraph roots so
+     *       shared {@code BlendDensity} / router tails are not remapped once per
+     *       extern reference.</li>
      *   <li><b>Marker-extern reuse.</b> Vanilla {@link DensityFunctions.MarkerOrMarked#mapAll}
      *       always allocates {@code new Marker(type, wrapped.mapAll(visitor))},
      *       even when the inner result is reference-identical. We bypass that by
@@ -256,13 +280,13 @@ public abstract class CompiledDensityFunction implements DensityFunction {
                 ? s
                 : new MapAllSession(visitor);
 
-        DensityFunction cached = session.compiledMemo.get(this);
+        DensityFunction cached = session.mapAllMemo.get(this);
         if (cached != null) {
             return cached;
         }
 
         DensityFunction result = doMapAll(session);
-        session.compiledMemo.put(this, result);
+        session.mapAllMemo.put(this, result);
         return result;
     }
 
@@ -295,15 +319,24 @@ public abstract class CompiledDensityFunction implements DensityFunction {
      * {@code NoiseChunk::wrap}'s identity/equality-keyed dedup fire.
      */
     private static DensityFunction mapExtern(DensityFunction src, MapAllSession session) {
+        DensityFunction cached = session.mapAllMemo.get(src);
+        if (cached != null) {
+            return cached;
+        }
+
+        DensityFunction result;
         if (src instanceof DensityFunctions.MarkerOrMarked marker) {
-            DensityFunction inner = marker.wrapped();
-            DensityFunction newInner = inner.mapAll(session);
-            DensityFunction effective = (newInner == inner)
+            DensityFunction wrapped = marker.wrapped();
+            DensityFunction newInner = mapExtern(wrapped, session);
+            DensityFunction effective = (newInner == wrapped)
                     ? src
                     : new DensityFunctions.Marker(marker.type(), newInner);
-            return session.apply(effective);
+            result = session.apply(effective);
+        } else {
+            result = src.mapAll(session);
         }
-        return src.mapAll(session);
+        session.mapAllMemo.put(src, result);
+        return result;
     }
 
     @Override
@@ -352,11 +385,10 @@ public abstract class CompiledDensityFunction implements DensityFunction {
      *   <li>{@link Codegen} for the {@code helper_<idx>} dispatch sites, with
      *       {@code invokedName = "helper_5"} etc. and
      *       {@code invokedType = (LCompiledDensityFunction;LFunctionContext;)D}.</li>
-     *   <li>The cell-lattice {@code lattice_y} / {@code lattice_inner} helpers
-     *       emitted by Phase 2's {@code fillArray} override. Those helpers use
-     *       a different {@code invokedType} (the {@code lattice_inner} variant
-     *       takes an extra {@code double} for the precomputed Y-slab value), so
-     *       sharing one bsm keeps the call-site emission uniform.</li>
+     *   <li>The cell-lattice {@code lattice_y} / {@code lattice_inner} /
+     *       {@code lattice_inner_batched} helpers from the {@code fillArray} override.
+     *       {@code lattice_inner} adds a {@code double} Y-slab argument;
+     *       {@code lattice_inner_batched} adds {@code double[][]} native slab outputs.</li>
      * </ul>
      *
      * <h2>Fallback path</h2>

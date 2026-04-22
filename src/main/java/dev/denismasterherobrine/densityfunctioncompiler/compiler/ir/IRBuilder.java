@@ -2,9 +2,12 @@ package dev.denismasterherobrine.densityfunctioncompiler.compiler.ir;
 
 import dev.denismasterherobrine.densityfunctioncompiler.compiler.McDensityFunctionClassNames;
 import dev.denismasterherobrine.densityfunctioncompiler.compiler.codegen.ConstantPool;
+import dev.denismasterherobrine.densityfunctioncompiler.compiler.compat.GeneratorAcceleratorInline;
 import dev.denismasterherobrine.densityfunctioncompiler.compiler.pipeline.CompilingVisitor;
+import dev.denismasterherobrine.densityfunctioncompiler.config.DfcConfig;
 import dev.denismasterherobrine.densityfunctioncompiler.compiler.spline.SplineInliner;
 import net.minecraft.util.CubicSpline;
+import net.minecraft.world.level.levelgen.Beardifier;
 import net.minecraft.world.level.levelgen.DensityFunction;
 import net.minecraft.world.level.levelgen.DensityFunctions;
 import net.minecraft.world.level.levelgen.synth.BlendedNoise;
@@ -29,6 +32,9 @@ import java.util.Map;
  *   <li><b>Unrecognised nodes invoke.</b> Anything we don't recognise becomes
  *       {@link IRNode.Invoke}, captured by identity into the constant pool. The codegen
  *       calls it through {@code INVOKEINTERFACE DensityFunction.compute}.</li>
+ *   <li><b>Generator Accelerator.</b> When present, {@code dev.sixik…Fast*} types are
+ *       unwrapped (see {@link GeneratorAcceleratorInline}) to the same IR as the vanilla
+ *       node they replace, so the rest of the pipeline can still fuse them.</li>
  * </ul>
  */
 public final class IRBuilder {
@@ -83,6 +89,9 @@ public final class IRBuilder {
         if (df instanceof DensityFunctions.MarkerOrMarked marker) {
             DensityFunction repackaged = outerVisitor.apply(marker);
             int idx = pool.internExtern(repackaged);
+            if (repackaged instanceof DensityFunctions.Marker mm && cacheWrapperMarkerSupportsDirectRead(mm.type())) {
+                pool.noteCacheWrapperFastPathExtern(idx);
+            }
             return intern(new IRNode.Marker(idx));
         }
 
@@ -253,6 +262,19 @@ public final class IRBuilder {
             return intern(new IRNode.EndIslands(idx));
         }
 
+        if (DfcConfig.beardifierSpecialize() && df instanceof Beardifier) {
+            int idx = pool.internExtern(df);
+            return intern(new IRNode.Beardifier(idx));
+        }
+
+        if (DfcConfig.generatorAcceleratorInline()
+                && df.getClass().getName().startsWith(GeneratorAcceleratorInline.PACKAGE_PREFIX)) {
+            IRNode ga = GeneratorAcceleratorInline.tryUnwrap(df, this);
+            if (ga != null) {
+                return ga;
+            }
+        }
+
         // BlendAlpha/BlendOffset/Beardifier, unknown mod / datapack DFs, etc.
         int idx = pool.internExtern(df);
         return intern(new IRNode.Invoke(idx));
@@ -261,5 +283,12 @@ public final class IRBuilder {
     /** Helper used by {@link SplineInliner} to walk a spline coordinate's underlying DF. */
     public IRNode walkChild(DensityFunction df) {
         return walk(df);
+    }
+
+    private static boolean cacheWrapperMarkerSupportsDirectRead(DensityFunctions.Marker.Type type) {
+        return type == DensityFunctions.Marker.Type.Cache2D
+                || type == DensityFunctions.Marker.Type.FlatCache
+                || type == DensityFunctions.Marker.Type.CacheOnce
+                || type == DensityFunctions.Marker.Type.CacheAllInCell;
     }
 }

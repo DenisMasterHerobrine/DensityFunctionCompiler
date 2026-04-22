@@ -223,6 +223,7 @@ final class SizeEstimator {
 
             case IRNode.Marker m -> 12; // ALOAD [CHECKCAST] GETFIELD ext_i + ALOAD/INVOKEINTERFACE
             case IRNode.Invoke iv -> 12;
+            case IRNode.Beardifier b -> 12;
             case IRNode.EndIslands e -> 14;
             case IRNode.BlendDensity bd -> {
                 int in = treatAllChildrenAsExtracted ? CALL_SITE_BYTES : sizeOfChild(bd.input());

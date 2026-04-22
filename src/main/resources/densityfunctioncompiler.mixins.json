@@ -4,17 +4,17 @@
   "package": "dev.denismasterherobrine.densityfunctioncompiler.mixin",
   "compatibilityLevel": "JAVA_21",
   "mixins": [
-    "NoiseChunkSessionMixin",
-    "NoiseChunkFlatCacheMixin",
     "NoiseChunkCache2dMixin",
     "NoiseChunkCacheAllInCellMixin",
     "NoiseChunkCacheOnceMixin",
-    "NoiseBasedAquiferMixin",
+    "NoiseChunkFlatCacheMixin",
+    "NoiseChunkSessionMixin",
     "NoiseRouterMixin",
     "RandomStateMixin",
+    "noise.BlendedNoiseAccessor",
+    "noise.ImprovedNoiseAccessor",
     "noise.NormalNoiseAccessor",
-    "noise.PerlinNoiseAccessor",
-    "noise.BlendedNoiseAccessor"
+    "noise.PerlinNoiseAccessor"
   ],
   "client": [
   ],

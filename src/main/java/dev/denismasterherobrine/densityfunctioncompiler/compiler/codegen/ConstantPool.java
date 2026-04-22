@@ -10,6 +10,7 @@ import net.minecraft.world.level.levelgen.synth.ImprovedNoise;
 import net.minecraft.world.level.levelgen.synth.NormalNoise;
 
 import java.util.ArrayList;
+import java.util.BitSet;
 import java.util.IdentityHashMap;
 import java.util.List;
 import java.util.Map;
@@ -40,6 +41,8 @@ public final class ConstantPool {
 
     private final List<DensityFunction> externs = new ArrayList<>();
     private final IdentityHashMap<DensityFunction, Integer> externIndex = new IdentityHashMap<>();
+    /** Extern indices whose call sites may use {@link dev.denismasterherobrine.densityfunctioncompiler.cache.DfcCacheFastPath}. */
+    private final BitSet cacheWrapperFastPathExtern = new BitSet();
 
     private final List<Object> splines = new ArrayList<>();
 
@@ -85,6 +88,15 @@ public final class ConstantPool {
         externs.add(df);
         externIndex.put(df, next);
         return next;
+    }
+
+    /** Mark an extern index as a NoiseChunk cell-cache marker eligible for {@code dfc$tryDirectRead}. */
+    public void noteCacheWrapperFastPathExtern(int externIndex) {
+        cacheWrapperFastPathExtern.set(externIndex);
+    }
+
+    public boolean externHasCacheWrapperFastPath(int externIndex) {
+        return cacheWrapperFastPathExtern.get(externIndex);
     }
 
     /** Append a spline blob (no deduplication; splines compare by structure not identity). */
@@ -154,6 +166,11 @@ public final class ConstantPool {
 
     public BlendedNoiseSpec blendedNoiseSpec(int idx) { return blendedNoiseSpecs.get(idx); }
     public int blendedNoiseSpecCount() { return blendedNoiseSpecs.size(); }
+
+    /** Snapshot for native handle layout (indices follow {@link #noiseSpecs()}). */
+    public java.util.List<BlendedNoiseSpec> blendedNoiseSpecsList() {
+        return java.util.List.copyOf(blendedNoiseSpecs);
+    }
 
     /**
      * Sum of all {@link ImprovedNoise} payload slots from {@link #noiseSpecs} (NormalNoise
