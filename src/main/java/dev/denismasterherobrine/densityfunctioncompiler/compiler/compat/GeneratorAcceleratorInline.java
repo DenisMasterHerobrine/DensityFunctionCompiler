@@ -12,7 +12,7 @@ import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 
 /**
- * <p>Moonrise Generator Accelerator replaces several registry codecs with
+ * <p>Generator Accelerator replaces several registry codecs with
  * {@code dev.sixik.generator_accelerator…Fast*} density function classes that are
  * drop-in with vanilla but are not {@code instanceof} the
  * {@link net.minecraft.world.level.levelgen.DensityFunctions} record types. Without
