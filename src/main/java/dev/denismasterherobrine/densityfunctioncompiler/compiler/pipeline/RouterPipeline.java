@@ -1,11 +1,13 @@
 package dev.denismasterherobrine.densityfunctioncompiler.compiler.pipeline;
 
 import dev.denismasterherobrine.densityfunctioncompiler.DensityFunctionCompiler;
+import dev.denismasterherobrine.densityfunctioncompiler.config.DfcConfig;
 import dev.denismasterherobrine.densityfunctioncompiler.compiler.cache.GlobalCompileCache;
 import dev.denismasterherobrine.densityfunctioncompiler.compiler.noise.BlendedNoiseSpecCache;
 import dev.denismasterherobrine.densityfunctioncompiler.compiler.noise.NoiseSpecCache;
 import net.minecraft.world.level.biome.Climate;
 import net.minecraft.world.level.levelgen.DensityFunction;
+import net.minecraft.world.level.levelgen.DensityFunctions;
 import net.minecraft.world.level.levelgen.NoiseRouter;
 
 import java.util.concurrent.ExecutionException;
@@ -17,6 +19,29 @@ import java.util.stream.IntStream;
 /**
  * Top-level orchestration for replacing every {@link NoiseRouter} field with a compiled
  * version. Holds aggregate stats consumed by the {@code /dfc} command.
+ *
+ * <p><strong>“Roots compiled” in {@code /dfc stats}</strong> is incremented once for every
+ * {@link dev.denismasterherobrine.densityfunctioncompiler.compiler.Compiler#compile} that
+ * finishes (global class-cache hit or miss). A full {@link RandomState} run therefore does
+ * {@code 15} (router fields) + {@code 6} (climate sampler fields, if enabled in config) ≈
+ * <strong>21</strong> roots <em>per</em> {@code RandomState} construction. With many mods,
+ * pregen, multi-world, or parallel noise configs you can have dozens of {@code RandomState}
+ * instances, so 800–1000+ roots on one session is often {@code 21 × ~40–50} and not a counter
+ * bug. The same is true in <strong>vanilla + DFC</strong> alone: a long session, menu,
+ * client+server, or many dimension transitions can build many {@code RandomState} instances
+ * and cumulatively high root counts. Compare {@code global class cache: hits} vs
+ * {@code codegen misses}—large time is usually from misses, not from hits re-linking a
+ * cached class.
+ *
+ * <p><strong>“Unique nodes” in {@code /dfc stats}:</strong> a running total of
+ * {@link dev.denismasterherobrine.densityfunctioncompiler.compiler.ir.IRBuilder#internedCount()}
+ * (distinct IR node identities) summed across <em>every</em> root compile, not a single-DF
+ * live graph size. To compare why two field graphs share a {@link
+ * dev.denismasterherobrine.densityfunctioncompiler.compiler.cache.CompilationFingerprint},
+ * use {@code /dfc dump} and inspect the IR + constant pool. When
+ * {@link DfcConfig#lazyNoiseRouter()} is true (opt-in, default false), a router field
+ * only contributes to the total when it is first used, not in {@code RandomState}’s
+ * constructor.
  */
 public final class RouterPipeline {
 
@@ -142,8 +167,6 @@ public final class RouterPipeline {
      * trace in the user's console.
      */
     public static NoiseRouter compile(NoiseRouter original) {
-        CompilingVisitor visitor = CompilingVisitor.global();
-        DensityFunction[] compiled = new DensityFunction[15];
         DensityFunction[] sources = new DensityFunction[]{
                 original.barrierNoise(),
                 original.fluidLevelFloodednessNoise(),
@@ -161,6 +184,29 @@ public final class RouterPipeline {
                 original.veinRidged(),
                 original.veinGap(),
         };
+        if (DfcConfig.lazyNoiseRouter()) {
+            DensityFunction[] out = new DensityFunction[15];
+            boolean any = false;
+            for (int i = 0; i < 15; i++) {
+                DensityFunction s = sources[i];
+                if (s instanceof DensityFunctions.Constant) {
+                    out[i] = s;
+                } else {
+                    out[i] = new OnDemandCompilingDensityFunction(s);
+                    any = true;
+                }
+            }
+            if (!any) {
+                return original;
+            }
+            return new NoiseRouter(
+                    out[0],  out[1],  out[2],  out[3],  out[4],
+                    out[5],  out[6],  out[7],  out[8],  out[9],
+                    out[10], out[11], out[12], out[13], out[14]
+            );
+        }
+        CompilingVisitor visitor = CompilingVisitor.global();
+        DensityFunction[] compiled = new DensityFunction[15];
         compileFieldsParallel(visitor, sources, compiled, sources.length, "compile");
         boolean anyChanged = false;
         for (int i = 0; i < sources.length; i++) {

@@ -13,6 +13,8 @@ repositories {
     mavenCentral()
     // MixinSquared
     maven { url = 'https://maven.bawnorton.com/releases' }
+    // Forgified Fabric API (Connector): MultiNoiseSamplerHooks, fabric-biome mixins
+    maven { url = 'https://maven.su5ed.dev/releases' }
 }
 
 base {
@@ -149,6 +151,9 @@ dependencies {
     compileOnly "org.ow2.asm:asm:${asmVersion}"
     compileOnly "org.ow2.asm:asm-tree:${asmVersion}"
     compileOnly "org.ow2.asm:asm-util:${asmVersion}"
+
+    // Forgified Fabric API (Sinytra)
+    compileOnly "org.sinytra.forgified-fabric-api:forgified-fabric-api:0.116.7+2.2.0+1.21.1"
 }
 
 tasks.named('jar', Jar) {

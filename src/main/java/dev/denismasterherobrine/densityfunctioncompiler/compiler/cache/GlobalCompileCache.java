@@ -47,7 +47,23 @@ public final class GlobalCompileCache {
              * the lattice rate even on global-cache hits — those don't re-run the
              * codegen so we'd otherwise undercount.
              */
-            boolean latticeEmitted) {}
+            boolean latticeEmitted,
+            /**
+             * Native {@code SlabInnerNativeProgram} buffer machine code from
+             * {@link dev.denismasterherobrine.densityfunctioncompiler.compiler.codegen.Codegen#emit}
+             * when a slab batch was compiled; may be null when lattice is scalar-only or
+             * native program compilation failed. Stored on the bundle so
+             * {@link dev.denismasterherobrine.densityfunctioncompiler.compiler.Compiler#compileWithDetail}
+             * does not re-run the lattice → slab plan → tryCompile path on every
+             * link (and on global-cache hits the constructor still receives the same
+             * slab program as the defining compile).
+             */
+            byte[] slabNativeProgram,
+            /**
+             * Constant table companion for {@link #slabNativeProgram}, or null
+             * when the program is null/empty.
+             */
+            double[] slabNativeConstants) {}
 
     /**
      * @param reused false only when this thread ran {@code onMiss} (first

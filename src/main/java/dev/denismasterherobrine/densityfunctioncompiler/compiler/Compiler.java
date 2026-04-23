@@ -10,17 +10,13 @@ import dev.denismasterherobrine.densityfunctioncompiler.compiler.codegen.HiddenC
 import dev.denismasterherobrine.densityfunctioncompiler.compiler.codegen.Splitter;
 import dev.denismasterherobrine.densityfunctioncompiler.compiler.ir.Bounds;
 import dev.denismasterherobrine.densityfunctioncompiler.compiler.ir.IRBuilder;
-import dev.denismasterherobrine.densityfunctioncompiler.compiler.ir.CellLatticeOption;
 import dev.denismasterherobrine.densityfunctioncompiler.compiler.ir.IRNode;
 import dev.denismasterherobrine.densityfunctioncompiler.compiler.ir.IROptimizer;
 import dev.denismasterherobrine.densityfunctioncompiler.compiler.ir.NoiseExpander;
 import dev.denismasterherobrine.densityfunctioncompiler.compiler.ir.RefCount;
-import dev.denismasterherobrine.densityfunctioncompiler.compiler.ir.SlabInnerNativeProgram;
-import dev.denismasterherobrine.densityfunctioncompiler.compiler.ir.SlabNativeBatchPlan;
 import dev.denismasterherobrine.densityfunctioncompiler.compiler.noise.BlendedNoiseSpec;
 import dev.denismasterherobrine.densityfunctioncompiler.compiler.pipeline.CompilingVisitor;
 import dev.denismasterherobrine.densityfunctioncompiler.compiler.pipeline.RouterPipeline;
-import dev.denismasterherobrine.densityfunctioncompiler.natives.CodegenNativeNoise;
 import dev.denismasterherobrine.densityfunctioncompiler.natives.NativeNoiseRegistry;
 import net.minecraft.world.level.levelgen.DensityFunction;
 import net.minecraft.world.level.levelgen.synth.NormalNoise;
@@ -169,7 +165,8 @@ public final class Compiler {
                 }
 
                 return new GlobalCompileCache.CopiedClassBundle(
-                        fClassName, cls, bytecode, ctorMH, helperHandles, helpersEmitted, latticeEmitted);
+                        fClassName, cls, bytecode, ctorMH, helperHandles, helpersEmitted, latticeEmitted,
+                        emitResult.slabInnerProgram(), emitResult.slabInnerConsts());
             });
             return linkAndRecord(lo.bundle(), lo.reused(), root, rc, pool, extracted, minVal, maxVal, uniqueNodes,
                     cseSavings, optimizerRewrites, noisesSpecialized, octavesUnrolled);
@@ -200,23 +197,8 @@ public final class Compiler {
         MethodHandle ctorMH = bundle.constructorHandle();
         MethodHandle[] helperHandles = bundle.helperHandles();
         long[] nativeHandles = NativeNoiseRegistry.buildHandles(pool.noiseSpecs(), pool.blendedNoiseSpecsList());
-        byte[] slabBc = null;
-        double[] slabC = null;
-        if (bundle.latticeEmitted()) {
-            var planOpt = CellLatticeOption.analyze(root);
-            if (planOpt.isPresent() && CodegenNativeNoise.emitNativeOps()) {
-                var plan = planOpt.get();
-                var slabPlan = SlabNativeBatchPlan.analyze(root, plan, pool.noiseSpecCount(), pool.blendedNoiseSpecCount())
-                        .orElse(null);
-                if (slabPlan != null) {
-                    var opt = SlabInnerNativeProgram.tryCompile(root, plan, slabPlan, extracted);
-                    if (opt.isPresent()) {
-                        slabBc = opt.get().bytecode();
-                        slabC = opt.get().constants();
-                    }
-                }
-            }
-        }
+        byte[] slabBc = bundle.slabNativeProgram();
+        double[] slabC = bundle.slabNativeConstants();
         CompiledDensityFunction compiled;
         try {
             compiled = (CompiledDensityFunction) ctorMH.invokeExact(

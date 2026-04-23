@@ -175,6 +175,18 @@ public final class ParitySelfTest {
         out.add(new Case("ap2_tasf_max(yc1, yc2)", DensityFunctions.max(y1, y2)));
         out.add(new Case("ap2_tasf_mul(yc1, yc2)", DensityFunctions.mul(y1, y2)));
 
+        // Interval-driven min/max with one constant: matches Math.min / Math.max on
+        // the un-optimized bytecode (IROptimizer peephole + Bounds.interval).
+        DensityFunction k5 = DensityFunctions.constant(5.0);
+        DensityFunction km2 = DensityFunctions.constant(-2.0);
+        out.add(new Case("fold_min(yc, 5) -> yc", DensityFunctions.min(yc, k5)));
+        out.add(new Case("fold_min(5, yc) -> yc", DensityFunctions.min(k5, yc)));
+        out.add(new Case("fold_min(yc, -2) -> -2", DensityFunctions.min(yc, km2)));
+        out.add(new Case("fold_max(yc, 5) -> 5", DensityFunctions.max(yc, k5)));
+        out.add(new Case("fold_max(yc, -2) -> yc", DensityFunctions.max(yc, km2)));
+        // Redundant clamp: yc's Bounds interval is already within [-1, 1].
+        out.add(new Case("clamp_noop(yc, [-1,1])", yc.clamp(-1.0, 1.0)));
+
         return out;
     }
 

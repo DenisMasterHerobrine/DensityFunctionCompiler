@@ -69,6 +69,10 @@ public final class CompilingVisitor implements DensityFunction.Visitor {
                 || df instanceof DensityFunctions.Constant) {
             return df;
         }
+        // Lazy NoiseRouter field wrapper: compile the wired tree, not the shell.
+        if (df instanceof OnDemandCompilingDensityFunction odf) {
+            return apply(odf.wired());
+        }
         // HolderHolder is a thin pointer to a registry value; peel it eagerly so we
         // compile the underlying DF once and share it across every router that points at
         // the same density_function entry. NoiseChunk.wrap also peels HolderHolder, so

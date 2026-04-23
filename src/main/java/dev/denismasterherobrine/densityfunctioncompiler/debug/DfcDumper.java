@@ -31,11 +31,11 @@ public final class DfcDumper {
     public static void dumpAll(CommandSourceStack src) {
         var stats = RouterPipeline.snapshotStats();
         src.sendSuccess(() -> Component.literal(
-                ("DFC dump: %d compiled roots, %d unique IR nodes, %d hidden classes alive, "
+                ("DFC dump: %d compiled roots, %d unique IR nodes (cumulative), %d hidden classes alive, "
                         + "%d node references collapsed by CSE, %d helper methods emitted, "
                         + "%d optimizer rewrite passes, %d noises inlined (%d octaves unrolled), "
                         + "%d blended roots (%d blended octaves in bytecode), "
-                        + "global class cache: %d hits, %d codegen misses")
+                        + "global class cache: %d hits, %d codegen misses (new SHA)")
                         .formatted(stats.rootsCompiled(), stats.uniqueNodes(),
                                 stats.classesAlive(), stats.savedByCse(),
                                 stats.helpersEmitted(), stats.optimizerRewrites(),

@@ -11,6 +11,7 @@ import dev.denismasterherobrine.densityfunctioncompiler.test.GlobalClassCacheTes
 import dev.denismasterherobrine.densityfunctioncompiler.test.LatticePlanTest;
 import dev.denismasterherobrine.densityfunctioncompiler.test.MapAllSessionTest;
 import dev.denismasterherobrine.densityfunctioncompiler.test.NativeNoiseParityTest;
+import dev.denismasterherobrine.densityfunctioncompiler.test.BytecodeVerifyTest;
 import dev.denismasterherobrine.densityfunctioncompiler.test.SlabBatchParityTest;
 import dev.denismasterherobrine.densityfunctioncompiler.test.ParitySelfTest;
 import dev.denismasterherobrine.densityfunctioncompiler.test.VanillaDensityFunctionCoverage;
@@ -58,11 +59,11 @@ public final class DfcCommand {
                     double blendedRate = RouterPipeline.blendedInlineRate();
                     var src = ctx.getSource();
                     src.sendSuccess(() -> Component.literal(
-                            ("DFC: %d roots compiled, %d unique IR nodes, %d hidden classes alive, "
+                            ("DFC: %d roots compiled, %d unique IR nodes (cumulative), %d hidden classes alive, "
                                     + "%d helpers emitted, %d optimizer rewrite passes, "
                                     + "%d noises inlined (%d octaves unrolled), "
                                     + "%d blended roots (%d blended octaves in bytecode), "
-                                    + "global class cache: %d hits, %d codegen misses")
+                                    + "global class cache: %d hits, %d codegen misses (new SHA)")
                                     .formatted(stats.rootsCompiled(), stats.uniqueNodes(),
                                             stats.classesAlive(), stats.helpersEmitted(),
                                             stats.optimizerRewrites(),
@@ -107,9 +108,11 @@ public final class DfcCommand {
                         VectorParityTest.verify();
                         NativeNoiseParityTest.verify();
                         SlabBatchParityTest.verify();
+                        BytecodeVerifyTest.verify();
                         ctx.getSource().sendSuccess(
                                 () -> Component.literal("DFC: global class cache + CoordDep + MapAllSession "
-                                        + "+ runtime helpers + LatticePlan + VectorParity + NativeNoise: OK"), false);
+                                        + "+ runtime helpers + LatticePlan + VectorParity + NativeNoise "
+                                        + "+ bytecode verify: OK"), false);
                     } catch (Throwable t) {
                         DensityFunctionCompiler.LOGGER.error("DFC cachetest failed", t);
                         ctx.getSource().sendFailure(Component.literal("cachetest: " + t.getMessage()));

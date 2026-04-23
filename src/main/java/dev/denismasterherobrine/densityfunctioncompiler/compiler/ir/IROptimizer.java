@@ -27,6 +27,11 @@ import java.util.Map;
  * it anyway because it's already shared. This keeps {@code x*2 -> x+x} from
  * blowing up bytecode size when {@code x} is a deep arithmetic chain that
  * isn't otherwise CSE-shared.
+ *
+ * <p>Further shrinking per-root IR and {@code /dfc stats} “unique node” totals is
+ * mostly about more parity-safe peepholes, fewer {@link IRNode.Invoke} leaves for
+ * mod types, and (only with a proof of identical evaluation) commutative
+ * normalisation in {@link dev.denismasterherobrine.densityfunctioncompiler.compiler.ir.IRBuilder#intern}.
  */
 public final class IROptimizer {
 
@@ -63,9 +68,11 @@ public final class IROptimizer {
     public static Result optimize(IRNode root, IRBuilder builder, ConstantPool pool) {
         IROptimizer opt = new IROptimizer(builder, pool);
         int iterationsThatRewrote = 0;
-        // One RefCount up front; recompute only after a successful rewrite (the graph
-        // is unchanged when !changed, so the previous snapshot stays valid).
-        RefCount.Result rc = RefCount.compute(root);
+        // One shared ref map for all fixpoint iterations: RefCount reuses the same
+        // IdentityHashMap (cleared per compute) so we do not allocate O(iterations)
+        // maps on large DAGs.
+        var refWs = new RefCount.Workspace();
+        RefCount.Result rc = RefCount.compute(refWs, root);
         for (int iter = 0; iter < MAX_ITERATIONS; iter++) {
             opt.refSnapshot = rc.refs();
             opt.memo = new IdentityHashMap<>();
@@ -76,7 +83,7 @@ public final class IROptimizer {
             }
             iterationsThatRewrote++;
             root = next;
-            rc = RefCount.compute(root);
+            rc = RefCount.compute(refWs, root);
         }
         return new Result(root, iterationsThatRewrote);
     }
@@ -215,6 +222,18 @@ public final class IROptimizer {
             }));
         }
 
+        // min(x, c) / max(x, c) (and const on the left) with one constant arm: if
+        // Bounds prove the non-constant side is always on one side of c, the
+        // result is bit-identical to Math.min / Math.max on the un-optimized
+        // bytecode (same left-to-right eval as Codegen.emitBin).
+        if (bin.op() == IRNode.BinOp.MIN) {
+            IRNode n = peepholeMinWithOneConst(l, r);
+            if (n != null) return n;
+        } else if (bin.op() == IRNode.BinOp.MAX) {
+            IRNode n = peepholeMaxWithOneConst(l, r);
+            if (n != null) return n;
+        }
+
         switch (bin.op()) {
             case ADD -> {
                 if (isConst(l, 0.0)) return r;
@@ -320,6 +339,16 @@ public final class IROptimizer {
         if (cl.min() >= cl.max()) {
             return intern(new IRNode.Const(cl.min()));
         }
+        // If Bounds prove every value of the input is already in [min, max], the
+        // clamp is a no-op (vanilla: max(min, min(v, max)) = v for v in range).
+        try {
+            double[] iv = Bounds.interval(cl.input(), pool);
+            if (Double.isFinite(iv[0]) && Double.isFinite(iv[1])
+                    && iv[0] >= cl.min() && iv[1] <= cl.max()) {
+                return cl.input();
+            }
+        } catch (RuntimeException ignore) {
+        }
         // Coalesce nested clamps: Clamp(Clamp(x, a, b), c, d) is just the
         // intersection of the two intervals. If they don't overlap the inner
         // clamp's output is fully outside the outer one and the result collapses
@@ -360,6 +389,72 @@ public final class IROptimizer {
             // Bounds bailout — keep the node as-is and let runtime evaluate.
         }
         return rc;
+    }
+
+    /**
+     * {@code min(x, c)} or {@code min(c, x)} with exactly one constant (the other
+     * side not a {@link IRNode.Const} so the two-const fold above does not apply).
+     * Folds to {@code x} or {@code c} when {@link Bounds#interval} proves the
+     * whole range of {@code x} is on one side of {@code c}, matching
+     * {@code Math.min} in {@code Codegen.emitBin}.
+     */
+    private IRNode peepholeMinWithOneConst(IRNode l, IRNode r) {
+        if (l instanceof IRNode.Const cl && !(r instanceof IRNode.Const)) {
+            return foldMinConstAndExpr(cl.value(), r);
+        }
+        if (r instanceof IRNode.Const cr && !(l instanceof IRNode.Const)) {
+            return foldMinConstAndExpr(cr.value(), l);
+        }
+        return null;
+    }
+
+    private IRNode foldMinConstAndExpr(double c, IRNode x) {
+        try {
+            double[] iv = Bounds.interval(x, pool);
+            double lo = iv[0];
+            double hi = iv[1];
+            if (!Double.isFinite(lo) || !Double.isFinite(hi) || !Double.isFinite(c)) {
+                return null;
+            }
+            if (hi <= c) {
+                return x;
+            }
+            if (lo >= c) {
+                return intern(new IRNode.Const(c));
+            }
+        } catch (RuntimeException ignore) {
+            // Opaque extern / missing bounds — keep min.
+        }
+        return null;
+    }
+
+    private IRNode peepholeMaxWithOneConst(IRNode l, IRNode r) {
+        if (l instanceof IRNode.Const cl && !(r instanceof IRNode.Const)) {
+            return foldMaxConstAndExpr(cl.value(), r);
+        }
+        if (r instanceof IRNode.Const cr && !(l instanceof IRNode.Const)) {
+            return foldMaxConstAndExpr(cr.value(), l);
+        }
+        return null;
+    }
+
+    private IRNode foldMaxConstAndExpr(double c, IRNode x) {
+        try {
+            double[] iv = Bounds.interval(x, pool);
+            double lo = iv[0];
+            double hi = iv[1];
+            if (!Double.isFinite(lo) || !Double.isFinite(hi) || !Double.isFinite(c)) {
+                return null;
+            }
+            if (lo >= c) {
+                return x;
+            }
+            if (hi <= c) {
+                return intern(new IRNode.Const(c));
+            }
+        } catch (RuntimeException ignore) {
+        }
+        return null;
     }
 
     /* --------------------------------------------------------------------- */

@@ -21,31 +21,49 @@ public final class RefCount {
 
     public record Result(IdentityHashMap<IRNode, Integer> refs, List<IRNode> spillSet) {}
 
+    /**
+     * Reused across {@link IROptimizer} fixpoint iterations: {@link #compute(Workspace, IRNode)}
+     * clears the internal ref map, avoiding a new {@link IdentityHashMap} on every
+     * optimizer pass for large IR DAGs.
+     */
+    public static final class Workspace {
+        public final IdentityHashMap<IRNode, Integer> refs = new IdentityHashMap<>();
+    }
+
     private RefCount() {}
 
     public static Result compute(IRNode root) {
-        IdentityHashMap<IRNode, Integer> refs = new IdentityHashMap<>();
+        return compute(new Workspace(), root);
+    }
 
+    /**
+     * Fills {@code st.refs} in place, then returns a new {@link Result} whose
+     * {@code refs()} view is the same map instance. Callers that retain the
+     * {@code Result} must not reuse the same {@link Workspace} until the result is
+     * discarded; {@link dev.denismasterherobrine.densityfunctioncompiler.compiler.ir.IROptimizer} only holds one live result per iteration.
+     */
+    public static Result compute(Workspace st, IRNode root) {
+        st.refs.clear();
         // BFS using identity to make sure interned-shared subtrees aren't double-counted.
         Deque<IRNode> stack = new ArrayDeque<>();
         Map<IRNode, Boolean> visited = new IdentityHashMap<>();
         stack.push(root);
         while (!stack.isEmpty()) {
             IRNode n = stack.pop();
-            refs.merge(n, 1, Integer::sum);
+            st.refs.merge(n, 1, Integer::sum);
             if (visited.put(n, Boolean.TRUE) != null) continue;
             for (IRNode c : children(n)) stack.push(c);
         }
 
         List<IRNode> spillSet = new ArrayList<>();
-        for (var e : refs.entrySet()) {
+        for (var e : st.refs.entrySet()) {
             IRNode n = e.getKey();
             if (e.getValue() < 2) continue;
             if (n instanceof IRNode.Const) continue;
             if (n instanceof IRNode.BlockX || n instanceof IRNode.BlockY || n instanceof IRNode.BlockZ) continue;
             spillSet.add(n);
         }
-        return new Result(refs, spillSet);
+        return new Result(st.refs, spillSet);
     }
 
     public static Iterable<IRNode> children(IRNode n) {

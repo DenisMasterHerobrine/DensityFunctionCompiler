@@ -1,7 +1,10 @@
 package dev.denismasterherobrine.densityfunctioncompiler.mixin;
 
 import dev.denismasterherobrine.densityfunctioncompiler.DensityFunctionCompiler;
+import dev.denismasterherobrine.densityfunctioncompiler.compat.FabricBiomeApiClimateRebind;
+import dev.denismasterherobrine.densityfunctioncompiler.config.DfcConfig;
 import dev.denismasterherobrine.densityfunctioncompiler.compiler.pipeline.RouterPipeline;
+import net.neoforged.fml.ModList;
 import dev.denismasterherobrine.densityfunctioncompiler.debug.RouterParityCheck;
 import net.minecraft.core.HolderGetter;
 import net.minecraft.world.level.biome.Climate;
@@ -23,9 +26,13 @@ import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
  *
  * <h2>Why this hook (and not {@link NoiseGeneratorSettings#noiseRouter()})</h2>
  *
- * <p>The previous implementation compiled lazily on the very first call to
- * {@code NoiseGeneratorSettings.noiseRouter()}. That looked correct in isolation
- * (parity check passed 15/15 across every dimension) but quietly destroyed worldgen:
+ * <p>Router fields can be compiled eagerly (legacy) or, when
+ * {@code DfcConfig.lazyNoiseRouter()} is true, on first use via
+ * {@link dev.denismasterherobrine.densityfunctioncompiler.compiler.pipeline.OnDemandCompilingDensityFunction}
+ * (still after wiring, never before). A previous <em>incorrect</em> design compiled
+ * lazily on the first call to {@code NoiseGeneratorSettings.noiseRouter()}. That looked
+ * correct in isolation (parity check passed 15/15 across every dimension) but quietly
+ * destroyed worldgen:
  * the first {@code noiseRouter()} caller is exactly {@link RandomState}'s constructor,
  * <em>before</em> it runs {@code mapAll(NoiseWiringHelper)}. At that point every
  * {@link net.minecraft.world.level.levelgen.DensityFunction.NoiseHolder NoiseHolder}
@@ -57,6 +64,14 @@ import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
  * is the same class as Mojmap's {@code RandomState}). The choice is forced — there is
  * no point earlier in the call chain where noises are bound but the router has not yet
  * been consumed by callers.
+ *
+ * <h2>Forgified Fabric + Sinytra Connector</h2>
+ * <p>When the Forgified Fabric API is present, {@code fabric-biome-api-v1} adds
+ * {@link MultiNoiseSamplerHooks} to {@code Climate$Sampler}. After
+ * {@link RouterPipeline#compileSampler} replaces the sampler, we call
+ * {@link FabricBiomeApiClimateRebind#propagateToCompiledSampler} (see also
+ * {@link ClimateSamplerFabricDfcFapiSupportMixin}). Gated on {@code ModList} so environments
+ * without FFAPI do not load Fabric types.</p>
  */
 @Mixin(value = RandomState.class, priority = 2000)
 public abstract class RandomStateMixin {
@@ -89,12 +104,16 @@ public abstract class RandomStateMixin {
         }
 
         Climate.Sampler compiledSampler;
-        try {
-            compiledSampler = RouterPipeline.compileSampler(wiredSampler);
-        } catch (Throwable t) {
-            DensityFunctionCompiler.LOGGER.warn(
-                    "RouterPipeline.compileSampler threw for wired sampler (settings={}); "
-                            + "leaving the vanilla sampler in place", settings, t);
+        if (DfcConfig.compileClimateSampler()) {
+            try {
+                compiledSampler = RouterPipeline.compileSampler(wiredSampler);
+            } catch (Throwable t) {
+                DensityFunctionCompiler.LOGGER.warn(
+                        "RouterPipeline.compileSampler threw for wired sampler (settings={}); "
+                                + "leaving the vanilla sampler in place", settings, t);
+                compiledSampler = wiredSampler;
+            }
+        } else {
             compiledSampler = wiredSampler;
         }
 
@@ -116,6 +135,10 @@ public abstract class RandomStateMixin {
 
         this.router = compiledRouter;
         this.sampler = compiledSampler;
+        ModList modList = ModList.get();
+        if (modList.isLoaded("forgified_fabric_api") || modList.isLoaded("fabric_api")) {
+            FabricBiomeApiClimateRebind.propagateToCompiledSampler(wiredSampler, compiledSampler, levelSeed);
+        }
 
         long elapsedMs = (System.nanoTime() - start) / 1_000_000L;
         DensityFunctionCompiler.LOGGER.info(

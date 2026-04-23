@@ -63,5 +63,7 @@ public final class GlobalClassCacheTest {
                 a.getClass().getName(), report.bundlesChecked(),
                 GlobalCompileCache.INSTANCE.instancesShared(),
                 GlobalCompileCache.INSTANCE.bytesSaved());
+
+        CompilerPipelineProfileTest.logToLogger();
     }
 }

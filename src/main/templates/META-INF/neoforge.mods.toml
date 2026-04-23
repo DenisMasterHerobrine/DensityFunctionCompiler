@@ -86,6 +86,16 @@ ordering = "NONE"
 side = "BOTH"
 reason = "DFC is tuned to take precedence over Moonrise mixins when both apply; MixinSquared is bundled for @TargetHandler patches."
 
+# Forgified Fabric API: optional; when present (e.g. Sinytra Connector) MultiNoiseSamplerHooks
+# must receive seed on DFC-rebuilt Climate.Sampler (see RandomStateMixin / FabricBiomeApiClimateRebind)
+[[dependencies."${mod_id}"]]
+modId = "forgified_fabric_api"
+type = "optional"
+versionRange = "[0.0.0,)"
+ordering = "NONE"
+side = "BOTH"
+reason = "Connector + Forgified Fabric: propagates fabric-biome-api climate sampler seed to compiled samplers; not required for plain NeoForge"
+
 # Features are specific properties of the game environment, that you may want to declare you require. This example declares
 # that your mod requires GL version 3.2 or higher. Other features will be added. They are side aware so declaring this won't
 # stop your mod loading on the server for example.
