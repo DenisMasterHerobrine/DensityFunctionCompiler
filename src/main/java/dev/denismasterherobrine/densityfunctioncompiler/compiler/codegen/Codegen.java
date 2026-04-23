@@ -1088,13 +1088,22 @@ public final class Codegen {
     }
 
     /**
+     * Puts {@code this.slabInnerProgram} in local 52. {@link #emitNativeSlabInnerAfterBatch} starts with
+     * this; the {@code !nativeSlabInnerVm} branch to the batched inner label must do the same so
+     * {@link ClassWriter} can merge stack-map frames.
+     */
+    private static void emitLoadSlabInnerProgramToLocal52(MethodVisitor mv) {
+        mv.visitVarInsn(Opcodes.ALOAD, 0);
+        mv.visitFieldInsn(Opcodes.GETFIELD, COMPILED_BASE_INTERNAL, "slabInnerProgram", "[B");
+        mv.visitVarInsn(Opcodes.ASTORE, 52);
+    }
+
+    /**
      * After native noise slab JNI fills {@code nativeSlabOut}, optionally run the lattice-inner postfix
      * VM in one JNI call and scatter into {@code values} using {@code NoiseChunk#arrayIndex}.
      */
     private static void emitNativeSlabInnerAfterBatch(MethodVisitor mv, Label yAfterInner, Label batchedJavaInner) {
-        mv.visitVarInsn(Opcodes.ALOAD, 0);
-        mv.visitFieldInsn(Opcodes.GETFIELD, COMPILED_BASE_INTERNAL, "slabInnerProgram", "[B");
-        mv.visitVarInsn(Opcodes.ASTORE, 52);
+        emitLoadSlabInnerProgramToLocal52(mv);
         mv.visitVarInsn(Opcodes.ALOAD, 52);
         mv.visitJumpInsn(Opcodes.IFNULL, batchedJavaInner);
         mv.visitVarInsn(Opcodes.ALOAD, 52);
@@ -1407,6 +1416,9 @@ public final class Codegen {
         if (nativeSlabInnerVm) {
             emitNativeSlabInnerAfterBatch(mv, yAfterInner, batchedXZ);
         } else {
+            // Match frame at batchedXZ with emitNativeSlabInnerAfterBatch's early branches (local 52 holds
+            // slabInnerProgram) so COMPUTE_FRAMES (ASM 9.8) can merge without ArrayIndexOutOfBoundsException.
+            emitLoadSlabInnerProgramToLocal52(mv);
             mv.visitJumpInsn(Opcodes.GOTO, batchedXZ);
         }
 
@@ -1593,6 +1605,7 @@ public final class Codegen {
         if (nativeSlabInnerVm) {
             emitNativeSlabInnerAfterBatchXz(mv, colAfterInner, batchedCol);
         } else {
+            emitLoadSlabInnerProgramToLocal52(mv);
             mv.visitJumpInsn(Opcodes.GOTO, batchedCol);
         }
 
@@ -1714,9 +1727,7 @@ public final class Codegen {
     }
 
     private static void emitNativeSlabInnerAfterBatchXz(MethodVisitor mv, Label colAfterInner, Label batchedJavaInner) {
-        mv.visitVarInsn(Opcodes.ALOAD, 0);
-        mv.visitFieldInsn(Opcodes.GETFIELD, COMPILED_BASE_INTERNAL, "slabInnerProgram", "[B");
-        mv.visitVarInsn(Opcodes.ASTORE, 52);
+        emitLoadSlabInnerProgramToLocal52(mv);
         mv.visitVarInsn(Opcodes.ALOAD, 52);
         mv.visitJumpInsn(Opcodes.IFNULL, batchedJavaInner);
         mv.visitVarInsn(Opcodes.ALOAD, 52);
