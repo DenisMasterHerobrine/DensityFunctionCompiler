@@ -46,7 +46,6 @@ public class DensityFunctionCompiler {
         bus.addListener(DensityFunctionCompiler::onRegisterCommands);
         bus.addListener(DensityFunctionCompiler::onServerStarting);
         bus.addListener(DensityFunctionCompiler::onDatapackSync);
-        bus.addListener(DensityFunctionCompiler::onPlayerLoggedIn);
     }
 
     private static void onRegisterCommands(RegisterCommandsEvent event) {
@@ -61,29 +60,5 @@ public class DensityFunctionCompiler {
         // Re-warm after every datapack reload — registries get rebuilt so the
         // identity-keyed visitor cache will need to compile the new instances.
         RegistryWarmer.warmAll(event.getPlayerList().getServer());
-    }
-
-    /**
-     * Dev-only: grant operator (permission level 4) to a player named {@code Dev} on
-     * join, so a local dedicated-server profile can use {@code /dfc} and other ops
-     * without hand-editing {@code ops.json} before each JFR / profiling run.
-     */
-    private static void onPlayerLoggedIn(PlayerEvent.PlayerLoggedInEvent event) {
-        if (!(event.getEntity() instanceof ServerPlayer sp)) {
-            return;
-        }
-        if (!"Dev".equals(sp.getGameProfile().getName())) {
-            return;
-        }
-        MinecraftServer server = sp.getServer();
-        if (server == null) {
-            return;
-        }
-        PlayerList list = server.getPlayerList();
-        if (list.isOp(sp.getGameProfile())) {
-            return;
-        }
-        list.op(sp.getGameProfile());
-        LOGGER.info("DFC: auto-opped game profile \"Dev\" (dev profiling helper).");
     }
 }

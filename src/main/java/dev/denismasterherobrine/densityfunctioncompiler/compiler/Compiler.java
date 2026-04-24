@@ -91,8 +91,10 @@ public final class Compiler {
             double minVal;
             double maxVal;
             try {
-                minVal = Bounds.min(root, pool);
-                maxVal = Bounds.max(root, pool);
+                // One interval walk: min+max would each call interval() with a fresh memo.
+                double[] iv = Bounds.interval(root, pool);
+                minVal = iv[0];
+                maxVal = iv[1];
             } catch (RuntimeException bx) {
                 minVal = df.minValue();
                 maxVal = df.maxValue();

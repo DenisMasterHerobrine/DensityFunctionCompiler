@@ -65,7 +65,7 @@ public final class RegistryWarmer {
                 try {
                     // Matches production: wiring + RandomStateMixin compile at <init> RETURN.
                     RandomState state = RandomState.create(settings, noiseGetter, levelSeed);
-                    if (containsAnyCompiled(state.router())) {
+                    if (routerHasDfcFields(state.router())) {
                         compiled++;
                     }
                 } catch (Throwable settingsErr) {
@@ -105,18 +105,22 @@ public final class RegistryWarmer {
     }
 
     /**
-     * Heuristic: a router was successfully compiled iff any of its top-level fields
-     * is a {@link CompiledDensityFunction}. We sample a few representative ones
-     * rather than all 15 fields — every router that compiles at all will have at
-     * least these set, since they're the "main" outputs.
+     * Heuristic: DFC is active on this router if any sampled top-level field is
+     * {@link CompiledDensityFunction} (eager compile) or
+     * {@link OnDemandCompilingDensityFunction} (lazy wrap).
      */
-    private static boolean containsAnyCompiled(NoiseRouter router) {
-        return router.finalDensity() instanceof CompiledDensityFunction
-                || router.initialDensityWithoutJaggedness() instanceof CompiledDensityFunction
-                || router.temperature() instanceof CompiledDensityFunction
-                || router.vegetation() instanceof CompiledDensityFunction
-                || router.continents() instanceof CompiledDensityFunction
-                || router.depth() instanceof CompiledDensityFunction
-                || router.barrierNoise() instanceof CompiledDensityFunction;
+    private static boolean routerHasDfcFields(NoiseRouter router) {
+        return fieldIsDfc(router.finalDensity())
+                || fieldIsDfc(router.initialDensityWithoutJaggedness())
+                || fieldIsDfc(router.temperature())
+                || fieldIsDfc(router.vegetation())
+                || fieldIsDfc(router.continents())
+                || fieldIsDfc(router.depth())
+                || fieldIsDfc(router.barrierNoise());
+    }
+
+    private static boolean fieldIsDfc(DensityFunction f) {
+        return f instanceof CompiledDensityFunction
+                || f instanceof OnDemandCompilingDensityFunction;
     }
 }

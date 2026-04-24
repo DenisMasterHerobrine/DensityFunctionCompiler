@@ -1,6 +1,11 @@
 #include "dfc_internal.h"
 #include <math.h>
 #include <stdlib.h>
+#include <string.h>
+
+#define DFC_BLEND_POOL 13
+#define DFC_BLEND_TLS_MAX_N 512
+static _Thread_local double dfc_blend_tls[DFC_BLEND_TLS_MAX_N * DFC_BLEND_POOL];
 
 static double clamped_lerp_mc(double start, double end, double delta) {
   if (delta < 0.0) {
@@ -15,7 +20,11 @@ static void wrap3_coords(double d0, double d1, double d2, double d11, double *wx
   *wz = dfc_wrap_axis(d2 * d11);
 }
 
-void dfc_blended_noise_sample1(const DfcBlendedSpec *s, double bx, double by, double bz, double *out) {
+/**
+ * Tight scalar path for JNI single-sample and {@code n==1} batch: avoid pool setup,
+ * three {@code dfc_wrap_axis_batch} calls per main octave, and {@code mad_add} overhead.
+ */
+static void blended_noise_one(const DfcBlendedSpec *s, double bx, double by, double bz, double *out) {
   double d0 = bx * s->xz_multiplier;
   double d1 = by * s->y_multiplier;
   double d2 = bz * s->xz_multiplier;
@@ -26,12 +35,14 @@ void dfc_blended_noise_sample1(const DfcBlendedSpec *s, double bx, double by, do
   double d7 = d6 / s->y_factor;
 
   double d10 = 0.0;
-  for (int i = 0; i < 8; i++) {
-    if (!s->main_present[i]) continue;
-    double d11 = 1.0 / (double) (1LL << i);
+  for (int oi = 0; oi < 8; oi++) {
+    if (!s->main_present[oi]) {
+      continue;
+    }
+    double d11 = 1.0 / (double) (1LL << oi);
     double wx, wy, wz;
     wrap3_coords(d3, d4, d5, d11, &wx, &wy, &wz);
-    double n = dfc_improved_noise_5(&s->main_octaves[i], wx, wy, wz, d7 * d11, d4 * d11);
+    double n = dfc_improved_noise_5(&s->main_octaves[oi], wx, wy, wz, d7 * d11, d4 * d11);
     d10 += n / d11;
   }
 
@@ -41,7 +52,9 @@ void dfc_blended_noise_sample1(const DfcBlendedSpec *s, double bx, double by, do
 
   if (d16 < 1.0) {
     for (int j = 0; j < 16; j++) {
-      if (!s->min_present[j]) continue;
+      if (!s->min_present[j]) {
+        continue;
+      }
       double d11 = 1.0 / (double) (1LL << j);
       double wx, wy, wz;
       wrap3_coords(d0, d1, d2, d11, &wx, &wy, &wz);
@@ -52,7 +65,9 @@ void dfc_blended_noise_sample1(const DfcBlendedSpec *s, double bx, double by, do
 
   if (d16 > 0.0) {
     for (int j = 0; j < 16; j++) {
-      if (!s->max_present[j]) continue;
+      if (!s->max_present[j]) {
+        continue;
+      }
       double d11 = 1.0 / (double) (1LL << j);
       double wx, wy, wz;
       wrap3_coords(d0, d1, d2, d11, &wx, &wy, &wz);
@@ -61,34 +76,150 @@ void dfc_blended_noise_sample1(const DfcBlendedSpec *s, double bx, double by, do
     }
   }
 
-  double v = clamped_lerp_mc(d8 / 512.0, d9 / 512.0, d16) / 128.0;
-  *out = v;
+  *out = clamped_lerp_mc(d8 / 512.0, d9 / 512.0, d16) / 128.0;
   (void) s->max_value;
 }
 
-void dfc_blended_noise_batch(const DfcBlendedSpec *s, const double *xs, const double *ys, const double *zs,
-                             double *outs, int n, int use_avx2) {
-  (void) use_avx2;
-  for (int i = 0; i < n; i++) {
-    dfc_blended_noise_sample1(s, xs[i], ys[i], zs[i], &outs[i]);
+void dfc_blended_noise_batch(const DfcBlendedSpec *s, const double *xs, const double *ys, const double *zs, double *outs,
+                             int n, int use_avx2) {
+  if (!s || n <= 0 || !xs || !ys || !zs || !outs) {
+    return;
   }
+  if (n == 1) {
+    blended_noise_one(s, xs[0], ys[0], zs[0], outs);
+    return;
+  }
+
+  size_t words = (size_t) n * (size_t) DFC_BLEND_POOL;
+  double *pool;
+  double *heap = NULL;
+  if (n <= DFC_BLEND_TLS_MAX_N) {
+    pool = dfc_blend_tls;
+  } else {
+    heap = (double *) malloc(words * sizeof(double));
+    if (!heap) {
+      for (int i = 0; i < n; i++) {
+        dfc_blended_noise_batch(s, &xs[i], &ys[i], &zs[i], &outs[i], 1, use_avx2);
+      }
+      return;
+    }
+    pool = heap;
+  }
+
+  double *d0 = pool;
+  double *d1 = pool + n;
+  double *d2 = pool + 2 * n;
+  double *d3 = pool + 3 * n;
+  double *d4 = pool + 4 * n;
+  double *d5 = pool + 5 * n;
+  double *d10 = pool + 6 * n;
+  double *d16 = pool + 7 * n;
+  double *d8a = pool + 8 * n;
+  double *d9a = pool + 9 * n;
+  double *wx = pool + 10 * n;
+  double *wy = pool + 11 * n;
+  double *wz = pool + 12 * n;
+  for (int i = 0; i < n; i++) {
+    d0[i] = xs[i] * s->xz_multiplier;
+    d1[i] = ys[i] * s->y_multiplier;
+    d2[i] = zs[i] * s->xz_multiplier;
+    d3[i] = d0[i] / s->xz_factor;
+    d4[i] = d1[i] / s->y_factor;
+    d5[i] = d2[i] / s->xz_factor;
+  }
+  const double d6 = s->y_multiplier * s->smear_scale_multiplier;
+  const double d7 = d6 / s->y_factor;
+  for (int i = 0; i < n; i++) d10[i] = 0.0;
+
+  /* Main: octave-outer, AVX2 wrap, fused mad_add (replaces n×sample1 inner loop for this part). */
+  for (int oi = 0; oi < 8; oi++) {
+    if (!s->main_present[oi]) continue;
+    const double d11 = 1.0 / (double) (1LL << oi);
+    for (int i = 0; i < n; i++) {
+      d8a[i] = d3[i] * d11;
+    }
+    dfc_wrap_axis_batch(d8a, wx, n, use_avx2);
+    for (int i = 0; i < n; i++) {
+      d8a[i] = d4[i] * d11;
+    }
+    dfc_wrap_axis_batch(d8a, wy, n, use_avx2);
+    for (int i = 0; i < n; i++) {
+      d8a[i] = d5[i] * d11;
+    }
+    dfc_wrap_axis_batch(d8a, wz, n, use_avx2);
+    for (int i = 0; i < n; i++) {
+      outs[i] = d4[i] * d11; /* y_max; outs overwritten at end */
+    }
+    dfc_improved_noise_5_mad_add(&s->main_octaves[oi], wx, wy, wz, d7 * d11, outs, 1.0 / d11, d10, n);
+  }
+
+  for (int i = 0; i < n; i++) {
+    d16[i] = (d10[i] / 10.0 + 1.0) * 0.5;
+  }
+  for (int i = 0; i < n; i++) {
+    d8a[i] = 0.0;
+    d9a[i] = 0.0;
+  }
+
+  /* Min / max: match per-sample1 order (all j for one i when branch applies). */
+  for (int i = 0; i < n; i++) {
+    if (d16[i] >= 1.0) {
+      continue;
+    }
+    for (int j = 0; j < 16; j++) {
+      if (!s->min_present[j]) {
+        continue;
+      }
+      const double d11 = 1.0 / (double) (1LL << j);
+      double ax, ay, az;
+      wrap3_coords(d0[i], d1[i], d2[i], d11, &ax, &ay, &az);
+      const double n =
+          dfc_improved_noise_5(&s->min_octaves[j], ax, ay, az, d6 * d11, d1[i] * d11);
+      d8a[i] += n / d11;
+    }
+  }
+  for (int i = 0; i < n; i++) {
+    if (d16[i] <= 0.0) {
+      continue;
+    }
+    for (int j = 0; j < 16; j++) {
+      if (!s->max_present[j]) {
+        continue;
+      }
+      const double d11 = 1.0 / (double) (1LL << j);
+      double ax, ay, az;
+      wrap3_coords(d0[i], d1[i], d2[i], d11, &ax, &ay, &az);
+      const double nv =
+          dfc_improved_noise_5(&s->max_octaves[j], ax, ay, az, d6 * d11, d1[i] * d11);
+      d9a[i] += nv / d11;
+    }
+  }
+
+  for (int i = 0; i < n; i++) {
+    outs[i] = clamped_lerp_mc(d8a[i] / 512.0, d9a[i] / 512.0, d16[i]) / 128.0;
+  }
+  (void) s->max_value;
+  free(heap);
 }
 
-DfcBlendedSpec *dfc_blended_spec_alloc_heap(const double *doubles6,
-                                            const uint8_t *main_perm, const double *main_orig,
-                                            const uint8_t *min_perm, const double *min_orig,
-                                            const uint8_t *max_perm, const double *max_orig,
-                                            const uint8_t *main_pres, const uint8_t *min_pres,
+void dfc_blended_noise_sample1(const DfcBlendedSpec *s, double bx, double by, double bz, double *out) {
+  blended_noise_one(s, bx, by, bz, out);
+}
+
+DfcBlendedSpec *dfc_blended_spec_alloc_heap(const double *doubles6, const uint8_t *main_perm, const double *main_orig,
+                                            const uint8_t *min_perm, const double *min_orig, const uint8_t *max_perm,
+                                            const double *max_orig, const uint8_t *main_pres, const uint8_t *min_pres,
                                             const uint8_t *max_pres) {
   DfcBlendedSpec *b = (DfcBlendedSpec *) calloc(1, sizeof(DfcBlendedSpec));
-  if (!b) return NULL;
+  if (!b) {
+    return NULL;
+  }
   b->xz_multiplier = doubles6[0];
   b->y_multiplier = doubles6[1];
   b->xz_factor = doubles6[2];
   b->y_factor = doubles6[3];
   b->smear_scale_multiplier = doubles6[4];
   b->max_value = doubles6[5];
-
   for (int i = 0; i < 8; i++) {
     b->main_present[i] = main_pres[i];
     if (b->main_present[i]) {
@@ -119,6 +250,4 @@ DfcBlendedSpec *dfc_blended_spec_alloc_heap(const double *doubles6,
   return b;
 }
 
-void dfc_blended_spec_free(DfcBlendedSpec *s) {
-  free(s);
-}
+void dfc_blended_spec_free(DfcBlendedSpec *s) { free(s); }

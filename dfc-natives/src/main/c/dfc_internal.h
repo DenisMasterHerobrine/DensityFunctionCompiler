@@ -49,6 +49,19 @@ double dfc_improved_noise_3(const DfcImprovedNoise *self, double x, double y, do
 double dfc_improved_noise_5(const DfcImprovedNoise *self, double x, double y, double z,
                             double y_scale, double y_max);
 
+/**
+ * Non-static core used by the normal stack sample1 path to avoid a wrapper hop; same as
+ * {@code noise_5} and {@code noise_3(…,0,0)}.
+ */
+double dfc_improved_eval5(const DfcImprovedNoise *self, double x, double y, double z, double y_scale, double y_max);
+
+/** acc[i] += amp * sample3 for each i (used by normal stack + inner batch paths). */
+void dfc_improved_noise_3_mad_add(const DfcImprovedNoise *self, const double *x, const double *y, const double *z,
+                                  double amp, double *acc, int n);
+/** acc[i] += amp * sample5; y_max varies per i, y_scale is the same for all i. */
+void dfc_improved_noise_5_mad_add(const DfcImprovedNoise *self, const double *x, const double *y, const double *z,
+                                  double y_scale, const double *y_max, double amp, double *acc, int n);
+
 void dfc_normal_noise_stack_sample1(const DfcNormalNoiseStack *s, double cx, double cy, double cz, double *out);
 
 void dfc_normal_noise_stack_batch(const DfcNormalNoiseStack *s, const double *xs, const double *ys,

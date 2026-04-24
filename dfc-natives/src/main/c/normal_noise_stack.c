@@ -2,6 +2,10 @@
 #include <stdlib.h>
 #include <string.h>
 
+/* One slab batch is at most a few hundred points; avoid heap on the hot path. */
+#define DFC_NSTACK_WXYZ_CAP 640
+static _Thread_local double dfc_nstack_tls_wxyz[DFC_NSTACK_WXYZ_CAP * 3];
+
 static void branch_sum_batch_add(const DfcPerlinBranch *b, const double *xs, const double *ys, const double *zs,
                                  double *acc, int n, int use_avx2, double *wx, double *wy, double *wz) {
   if (!b || b->n <= 0 || n <= 0) return;
@@ -25,9 +29,7 @@ static void branch_sum_batch_add(const DfcPerlinBranch *b, const double *xs, con
     dfc_wrap_axis_batch(wx, wx, n, use_avx2);
     dfc_wrap_axis_batch(wy, wy, n, use_avx2);
     dfc_wrap_axis_batch(wz, wz, n, use_avx2);
-    for (int i = 0; i < n; i++) {
-      acc[i] += amp * dfc_improved_noise_3(&b->octaves[o], wx[i], wy[i], wz[i]);
-    }
+    dfc_improved_noise_3_mad_add(&b->octaves[o], wx, wy, wz, amp, acc, n);
   }
 }
 
@@ -47,7 +49,7 @@ static double branch_sum(const DfcPerlinBranch *b, double cx, double cy, double 
     double wy = dfc_wrap_axis(y * inf);
     double wz = dfc_wrap_axis(z * inf);
     double amp = b->amp_factors[i];
-    sum += amp * dfc_improved_noise_3(&b->octaves[i], wx, wy, wz);
+    sum += amp * dfc_improved_eval5(&b->octaves[i], wx, wy, wz, 0.0, 0.0);
   }
   return sum;
 }
@@ -61,17 +63,24 @@ void dfc_normal_noise_stack_sample1(const DfcNormalNoiseStack *s, double cx, dou
 void dfc_normal_noise_stack_batch(const DfcNormalNoiseStack *s, const double *xs, const double *ys,
                                   const double *zs, double *outs, int n, int use_avx2) {
   if (!s || n <= 0) return;
-  size_t bytes = (size_t) n * sizeof(double) * 3;
-  double *tmp = (double *) malloc(bytes);
-  if (!tmp) {
-    for (int i = 0; i < n; i++) {
-      dfc_normal_noise_stack_sample1(s, xs[i], ys[i], zs[i], &outs[i]);
+  int need = n * 3;
+  double *wx;
+  double *tmp_heap = NULL;
+  if (need <= DFC_NSTACK_WXYZ_CAP * 3) {
+    wx = dfc_nstack_tls_wxyz;
+  } else {
+    size_t bytes = (size_t) n * sizeof(double) * 3;
+    tmp_heap = (double *) malloc(bytes);
+    if (!tmp_heap) {
+      for (int i = 0; i < n; i++) {
+        dfc_normal_noise_stack_sample1(s, xs[i], ys[i], zs[i], &outs[i]);
+      }
+      return;
     }
-    return;
+    wx = tmp_heap;
   }
-  double *wx = tmp;
-  double *wy = tmp + n;
-  double *wz = tmp + 2 * (size_t) n;
+  double *wy = wx + n;
+  double *wz = wx + 2 * (size_t) n;
   for (int i = 0; i < n; i++) {
     outs[i] = 0.0;
   }
@@ -81,7 +90,7 @@ void dfc_normal_noise_stack_batch(const DfcNormalNoiseStack *s, const double *xs
   for (int i = 0; i < n; i++) {
     outs[i] *= vf;
   }
-  free(tmp);
+  free(tmp_heap);
 }
 
 DfcNormalNoiseStack *dfc_normal_stack_alloc_heap(double value_factor,

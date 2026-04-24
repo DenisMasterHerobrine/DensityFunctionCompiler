@@ -89,6 +89,11 @@ public abstract class RandomStateMixin {
                                         HolderGetter<NormalNoise.NoiseParameters> noises,
                                         long levelSeed,
                                         CallbackInfo ci) {
+        // :dfc-c2me redirects C2ME's BytecodeGen.compile to our Compiler while reusing C2ME's
+        // RandomState hook; compiling here too would stack two pipelines on the same router.
+        if (ModList.get().isLoaded("dfc_c2me")) {
+            return;
+        }
         long start = System.nanoTime();
         NoiseRouter wiredRouter = this.router;
         Climate.Sampler wiredSampler = this.sampler;

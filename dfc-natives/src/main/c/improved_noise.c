@@ -61,12 +61,8 @@ static double sample_and_lerp(const DfcImprovedNoise *self, int grid_x, int grid
   return lerp3(d8, d9, d10, d0, d1, d2, d3, d4, d5, d6, d7);
 }
 
-double dfc_improved_noise_3(const DfcImprovedNoise *self, double x, double y, double z) {
-  return dfc_improved_noise_5(self, x, y, z, 0.0, 0.0);
-}
-
-double dfc_improved_noise_5(const DfcImprovedNoise *self, double x, double y, double z,
-                            double y_scale, double y_max) {
+double dfc_improved_eval5(const DfcImprovedNoise *self, double x, double y, double z, double y_scale,
+                          double y_max) {
   double d0 = x + self->xo;
   double d1 = y + self->yo;
   double d2 = z + self->zo;
@@ -84,4 +80,29 @@ double dfc_improved_noise_5(const DfcImprovedNoise *self, double x, double y, do
     d6 = 0.0;
   }
   return sample_and_lerp(self, gi, gj, gk, d3, d4 - d6, d5, d4);
+}
+
+double dfc_improved_noise_3(const DfcImprovedNoise *self, double x, double y, double z) {
+  return dfc_improved_eval5(self, x, y, z, 0.0, 0.0);
+}
+
+double dfc_improved_noise_5(const DfcImprovedNoise *self, double x, double y, double z,
+                            double y_scale, double y_max) {
+  return dfc_improved_eval5(self, x, y, z, y_scale, y_max);
+}
+
+void dfc_improved_noise_3_mad_add(const DfcImprovedNoise *self, const double *x, const double *y, const double *z,
+                                 double amp, double *acc, int n) {
+  if (!self || n <= 0) return;
+  for (int i = 0; i < n; i++) {
+    acc[i] += amp * dfc_improved_eval5(self, x[i], y[i], z[i], 0.0, 0.0);
+  }
+}
+
+void dfc_improved_noise_5_mad_add(const DfcImprovedNoise *self, const double *x, const double *y, const double *z,
+                                  double y_scale, const double *y_max, double amp, double *acc, int n) {
+  if (!self || n <= 0) return;
+  for (int i = 0; i < n; i++) {
+    acc[i] += amp * dfc_improved_eval5(self, x[i], y[i], z[i], y_scale, y_max[i]);
+  }
 }
